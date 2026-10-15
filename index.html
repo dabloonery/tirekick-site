@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tirekick: kick the tires before you buy</title>
+<meta name="description" content="A free browser extension for buying on secondhand marketplaces, starting with eBay and Facebook Marketplace: likely scams marked, prices checked against what the same thing actually sold for, and help with your offer. No account, and nothing leaves your browser.">
+<meta name="theme-color" content="#1A2B4C">
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+<meta property="og:title" content="Tirekick: kick the tires before you buy">
+<meta property="og:description" content="Scam marks and price checks for listings on secondhand marketplaces, starting with eBay and Facebook Marketplace. Free, no account.">
+<meta property="og:image" content="https://tirekick.app/icon.png">
+<meta property="og:url" content="https://tirekick.app/">
+<link rel="canonical" href="https://tirekick.app/">
+</head>
+<body>
+<div class="hero-band">
+  <header class="wrap top">
+    <a class="brand" href="./" aria-label="Tirekick home">
+      <img src="icon.png" alt="" width="36" height="36">
+      <span class="wordmark" role="img" aria-label="Tirekick">t<span class="wm-i" aria-hidden="true">ı</span>rek<span class="wm-i" aria-hidden="true">ı</span>ck</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="#free">What it does</a>
+      <a class="wide" href="#modes">Buyers and resellers</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="support.html">Help</a>
+    </nav>
+  </header>
+
+  <div class="wrap hero">
+    <div>
+      <p class="kicker">Free for secondhand marketplaces</p>
+      <h1>Kick the tires <em>before you buy.</em></h1>
+      <p class="lede">Is it a deal, or a scam? Tirekick looks over listings with you on secondhand marketplaces, marks the ones with scam signs, and shows what the same thing actually sold for. It works on eBay and Facebook Marketplace today, with more stores to come.</p>
+      <ul class="chips" aria-label="Examples of the marks Tirekick puts on listing cards">
+        <li class="chip warn">Scam: reposted</li>
+        <li class="chip good">Good price · $53 below typical</li>
+        <li class="chip warn">Likely scam? Typical is $300</li>
+        <li class="chip good">↓ $15 since Oct 3</li>
+      </ul>
+      <div class="cta">
+        <!-- LAUNCH: replace STORE_LISTING_URL with the Chrome Web Store listing's address. -->
+        <a class="btn primary" href="STORE_LISTING_URL">Add to Chrome</a>
+        <a class="btn ghost" href="#private">Is it safe?</a>
+      </div>
+      <p class="soon">Free on the Chrome Web Store. For Chrome and Vivaldi on a computer.</p>
+    </div>
+
+    <figure class="panel">
+      <div class="panel-head"><b>“weber grill”</b><span>5 listings · 1 possible scam</span></div>
+      <ol class="rows" aria-label="An example: five listings from one search, each with a score and a verdict">
+        <li class="row" data-v="great">
+          <div class="dot" style="--lit:20"><span>91</span></div>
+          <div><div class="t">Weber Spirit II 3-burner, cover included</div><div class="verdict">Great deal</div></div>
+          <div class="p">$140<small>$100 below typical</small></div>
+        </li>
+        <li class="row" data-v="good">
+          <div class="dot" style="--lit:16"><span>74</span></div>
+          <div><div class="t">Weber Genesis, some rust on the grates</div><div class="verdict">Worth a look</div></div>
+          <div class="p">$220<small>$60 below typical</small></div>
+        </li>
+        <li class="row" data-v="fair">
+          <div class="dot" style="--lit:12"><span>55</span></div>
+          <div><div class="t">Weber Q1200 portable, used twice</div><div class="verdict">Fair price</div></div>
+          <div class="p">$150<small>about typical</small></div>
+        </li>
+        <li class="row" data-v="pass">
+          <div class="dot" style="--lit:7"><span>31</span></div>
+          <div><div class="t">Weber kettle 22", lid handle missing</div><div class="verdict">Skip</div></div>
+          <div class="p">$90<small>$30 above typical</small></div>
+        </li>
+        <li class="row" data-v="suspicious">
+          <div class="dot" style="--lit:2"><span>8</span></div>
+          <div><div class="t">Weber Genesis new in box, text me to buy</div><div class="verdict">Likely scam</div></div>
+          <div class="p">$75<small>$465 below typical</small></div>
+        </li>
+      </ol>
+      <figcaption>The price checks and scam marks are free. The scores come from an AI, if you turn one on.</figcaption>
+    </figure>
+  </div>
+</div>
+
+<main>
+  <section class="strip" aria-label="What it works on">
+    <div class="wrap">
+      <p>For anything people sell secondhand:</p>
+      <ul>
+        <li>Furniture</li><li>Tools</li><li>Bikes</li><li>Baby gear</li><li>Appliances</li><li>Clothes and shoes</li>
+        <li>Lawn and garden</li><li>Phones and games</li><li>Instruments</li><li>Collectibles</li><li>Sports gear</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band" id="free">
+    <div class="wrap">
+      <h2>Free, with no account.</h2>
+      <p class="sub">Everything in this section works without an AI: it’s built on plain checks and real eBay sales. The marks appear on the listing cards as the page loads, and the Tirekick panel has the rest.</p>
+      <div class="cols four">
+        <div class="card" data-c="suspicious">
+          <div class="icon" aria-hidden="true">!</div>
+          <h3>Spot the scams</h3>
+          <ul>
+            <li>The same listing reposted with a new code on the title</li>
+            <li>A photo you’ve already seen on a different listing</li>
+            <li>“Text me” and other ways to move you off the site</li>
+            <li>A price far too low against what it sells for</li>
+            <li>Sellers who joined Facebook this year, or have few ratings on eBay</li>
+          </ul>
+        </div>
+        <div class="card" data-c="great">
+          <div class="icon" aria-hidden="true">$</div>
+          <h3>Know what it’s worth</h3>
+          <ul>
+            <li>How far below or above the typical price each listing is, in dollars, from real eBay sales</li>
+            <li>The sales behind each number, and how far to trust it</li>
+            <li>Select a product name on any website, right-click, and look it up</li>
+          </ul>
+        </div>
+        <div class="card" data-c="fair">
+          <div class="icon" aria-hidden="true">%</div>
+          <h3>Pay less</h3>
+          <ul>
+            <li>What to offer and when to walk away, with a message you can copy</li>
+            <li>When the seller answers, whether to take it</li>
+            <li>Price drops, and how long it’s been for sale</li>
+          </ul>
+        </div>
+        <div class="card" data-c="accent">
+          <div class="icon" aria-hidden="true">★</div>
+          <h3>Keep track</h3>
+          <ul>
+            <li>Save listings and searches from both sites in one place</li>
+            <li>See which saved ones got cheaper</li>
+            <li>Filter a search by words, price, or broken and untested</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band tint" id="modes">
+    <div class="wrap">
+      <h2>Buying to keep, or buying to flip?</h2>
+      <p class="sub">Pick a mode in the panel. Tirekick changes what it looks for.</p>
+      <div class="cols two">
+        <div class="mode" data-c="great">
+          <div class="mode-tag">Buyer</div>
+          <h3>For the things you’ll use</h3>
+          <p>Buying a couch, a stroller or a riding mower from a stranger? Check it before you message the seller.</p>
+          <ul class="ticks">
+            <li>Likely scams grayed out and sorted last</li>
+            <li>Broken and untested listings hidden with one switch</li>
+            <li>A fair offer, and a price to walk away at</li>
+          </ul>
+        </div>
+        <div class="mode" data-c="accent">
+          <div class="mode-tag">Reseller</div>
+          <h3>For the things you’ll sell on</h3>
+          <p>Picking up furniture, tools or anything else to sell on eBay? See the sold prices without leaving the listing.</p>
+          <ul class="ticks">
+            <li>Broken only: the “any of these words” search Marketplace can’t do</li>
+            <li>What broken ones sell for, so you know your worst case</li>
+            <li>Your saved list as a spreadsheet, with prices and dates</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="ai">
+    <div class="wrap split">
+      <div>
+        <h2>Optional: an AI second opinion.</h2>
+        <p class="sub">Tirekick also has AI features. They stay off until you connect an AI service yourself, and nothing is sent to it until you press Scan or Analyze, or turn on automatic scanning. Skip it and everything above still works.</p>
+      </div>
+      <ul class="ticks">
+        <li>A score from 0 to 100 and a one-line verdict on every listing</li>
+        <li>One listing up close: red flags, questions to ask and a fair offer</li>
+        <li>In Reseller mode: the likely fault, how hard it is to fix, parts and your margin after eBay’s fees</li>
+        <li>Pick any AI service you have a key for (Anthropic, DeepSeek, Google Gemini, Mistral, OpenAI, OpenRouter, xAI), or a free model on your own computer with Ollama or LM Studio. With a small model, a scan of 50 listings usually costs less than a cent.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band navy" id="private">
+    <div class="wrap">
+      <h2>It only looks when you do.</h2>
+      <ul class="facts">
+        <li><b>It never acts for you.</b><span>It reads the page in front of you. It never logs in, clicks, posts or messages anyone.</span></li>
+        <li><b>No account, no server, no analytics.</b><span>The developer receives nothing about you.</span></li>
+        <li><b>Everything it keeps stays in your browser.</b><span>Settings, saved listings and what you’ve seen.</span></li>
+        <li><b>Your AI key goes only to the service you chose.</b><span>And only when you press a button, or turn on automatic scanning.</span></li>
+      </ul>
+      <p class="sub"><a href="privacy.html">Read the privacy policy</a> · <a href="support.html#faq">Common questions</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Tirekick™. Not affiliated with or endorsed by eBay or Meta. Scores, prices and warnings are estimates to help you decide, not a guarantee.</span>
+    <span><a href="privacy.html">Privacy</a> · <a href="support.html">Help and contact</a></span>
+  </div>
+</footer>
+</body>
+</html>
