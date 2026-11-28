@@ -237,7 +237,8 @@
     if (key && pending?.[key] > now) return { pending: pending[key] - now };
     if (lastCheck > 0 && now - lastCheck < S.SOLD_WARY_MS) (perHour = Math.ceil(perHour / 2)), (gap *= 3);
     const recent = (Array.isArray(log) ? log : []).filter((t) => Number.isFinite(t) && now - t < 60 * 60 * 1000);
-    if (recent.length >= perHour) return { full: true, perHour };
+    // full: when the next turn frees up (the hour's oldest that counts drops out), for the message to say
+    if (recent.length >= perHour) return { full: true, perHour, freeAt: [...recent].sort((a, b) => a - b)[recent.length - perHour] + 60 * 60 * 1000 };
     const at = Math.max(now, recent.length ? Math.max(...recent) + gap : now);
     return { wait: at - now, log: [...recent, at], perHour };
   };
