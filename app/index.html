@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Tirekick workbench</title>
+<meta name="description" content="Tirekick's workbench on your phone: the most to pay for a find, questions for the seller, a safety checklist, and your finds from bought to sold. Works offline, and nothing leaves your phone.">
+<meta name="theme-color" content="#1C2433">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<script src="lib/theme.js" data-root data-fonts="../fonts/"></script>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<main>
+  <header>
+    <img class="mark" src="icon-192.png" alt="" width="36" height="36">
+    <h1><span class="wordmark">t<span class="wm-i" aria-hidden="true">ı</span>rek<span class="wm-i" aria-hidden="true">ı</span>ck</span> <span class="sub">workbench</span></h1>
+  </header>
+
+  <p class="install" id="install" hidden></p>
+
+  <section class="card" aria-labelledby="check-h">
+    <h2 id="check-h">Check a find</h2>
+    <p class="hint">At a thrift store, a yard sale or on a listing: the most to pay to keep your profit once it resells on eBay. Nothing leaves your phone.</p>
+    <form id="check" autocomplete="off">
+      <label class="wide">What it is <input id="q" type="text" placeholder="e.g. Pentax K1000 camera" enterkeyhint="next"></label>
+      <label>Asking $ <input id="ask" type="number" min="0" step="any" inputmode="decimal" placeholder="Optional"></label>
+      <label>Sells for $ <input id="sold" type="number" min="0" step="any" inputmode="decimal" placeholder="Typical sale"></label>
+      <details class="more">
+        <summary>Shipping, parts, your profit and fees</summary>
+        <div class="more-in">
+          <label>Shipping buyers paid $ <input id="ship" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></label>
+          <label>Parts you'll put in $ <input id="parts" type="number" min="0" step="any" inputmode="decimal" placeholder="0"></label>
+          <label>Profit you want $ <input id="profit" type="number" min="0" step="any" inputmode="decimal"></label>
+          <label>Selling fees % <input id="fee" type="number" min="0" max="50" step="any" inputmode="decimal"></label>
+        </div>
+      </details>
+    </form>
+    <p class="hint sold-how">Sells for: the typical price it sold for. <a id="sold-link" href="https://www.ebay.com/sch/i.html?LH_Sold=1&amp;LH_Complete=1" target="_blank" rel="noopener noreferrer">See its eBay sales</a>, skip parts and lots, and take the middle one.</p>
+    <div class="out" id="out" aria-live="polite"></div>
+  </section>
+
+  <section class="card" aria-labelledby="bench-h">
+    <h2 id="bench-h">Your finds</h2>
+    <p class="bench-sum" id="sum" aria-live="polite"></p>
+    <div class="rows" id="rows"></div>
+    <p class="hint empty" id="empty">Nothing yet. Check a find and press Add to workbench, or bring your finds over from Tirekick on your computer below.</p>
+  </section>
+
+  <section class="card" aria-labelledby="ask-h">
+    <h2 id="ask-h">Before you meet</h2>
+    <p class="hint">Plain templates to copy. The questions are for the seller; the checklist is for you.</p>
+    <div class="copy-row">
+      <button type="button" id="copy-q">Copy questions for the seller</button>
+      <button type="button" id="copy-s">Copy the safety checklist</button>
+    </div>
+    <details class="more">
+      <summary>Show them</summary>
+      <pre class="tpl" id="tpl-q"></pre>
+      <ul class="safety" id="safety"></ul>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="backup-h">
+    <h2 id="backup-h">Keep a copy</h2>
+    <p class="hint" id="keep-why">Your finds are kept only on this phone. Save a copy now and then: it's the same file Tirekick on your computer restores in its settings, and that file (a backup from your computer) opens here too.</p>
+    <div class="copy-row">
+      <button type="button" id="export">Save a copy</button>
+      <button type="button" id="import">Open a copy or a backup</button>
+      <input type="file" id="import-file" accept=".json,application/json" hidden>
+    </div>
+    <p class="note" id="note" role="status"></p>
+  </section>
+
+  <footer>
+    <a href="../">tirekick.app</a> · <a href="../privacy.html">Privacy</a> · Works offline once opened. No account, and nothing is sent anywhere.
+  </footer>
+</main>
+<script src="lib/sites.js"></script>
+<script src="lib/shared.js"></script>
+<script src="lib/rules.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

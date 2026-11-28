@@ -1,0 +1,1824 @@
+// Tirekick: the plain rules behind the panel, as functions with no page, storage or network in them.
+// Word matching and filters, scam signs, what counts as a fix-up project, how a photo check moves a
+// verdict, and a few small formatters. The panel (content/panel.js) holds the state and calls these;
+// tests/unit.test.mjs runs them on their own.
+
+(() => {
+  const R = (window.TKRules = {});
+
+  R.clamp100 = (n) => Math.max(0, Math.min(100, n));
+  R.RANK = { pass: 0, fair: 1, good: 2, great: 3 };
+  // Each verdict's range of scores. The model picks both; when they disagree (a "great" at 55), the verdict
+  // is the judgment and the score moves into its range, so the number and the word on a tag never conflict.
+  // The same lines as adjustedVerdict's: under 45 a pass, under 60 fair, under 75 good.
+  R.BANDS = { great: [75, 100], good: [60, 74], fair: [45, 59], pass: [0, 44], suspicious: [0, 30] };
+  R.fitScore = (verdict, score) => {
+    const [lo, hi] = R.BANDS[verdict] || [0, 100];
+    return Math.max(lo, Math.min(hi, Math.round(Number(score) || 0)));
+  };
+  R.signed = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : "±0");
+  R.dollars = (n) => `$${Number.isInteger(n) ? n : n.toFixed(2)}`;
+  const SHORT_DATE = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }); // made once: it's slow to make
+  R.shortDate = (ts) => SHORT_DATE.format(new Date(ts));
+  // Accents don't change a word ("Pokémon" is "pokemon"), and letters in any alphabet are letters.
+  // Kept for the texts seen lately: every card's title and text are folded again each time a feed loads more.
+  const folded = new Map();
+  R.fold = (t) => {
+    const s = String(t ?? "");
+    let out = folded.get(s);
+    if (out === undefined) {
+      if (folded.size > 5000) folded.clear();
+      folded.set(s, (out = s.normalize("NFD").replace(/\p{M}+/gu, "").toLowerCase()));
+    }
+    return out;
+  };
+  R.normTitle = (t) => R.fold(t).replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  R.hash = (str) => {
+    let x = 5381;
+    for (let i = 0; i < str.length; i++) x = ((x << 5) + x + str.charCodeAt(i)) | 0;
+    return (x >>> 0).toString(36);
+  };
+
+  // Words too broad to price: a store's category ("Electronics", "Video Games & Consoles") or a word like
+  // "stuff". A median of everything sold under "electronics" says nothing about one listing, so these get no
+  // page-wide comparison; each listing can still be priced from its own title.
+  const BROAD = new Set(("electronics|video games|video games consoles|games|consoles|cell phones|cell phones accessories|phones|" +
+    "computers|computers tablets networking|tablets|cameras|cameras photo|home|home garden|garden|home improvement|household|" +
+    "furniture|appliances|clothing|clothing shoes accessories|clothes|shoes|accessories|toys|toys hobbies|toys games|hobbies|" +
+    "collectibles|collectibles art|art|antiques|sporting goods|sports|sports outdoors|outdoors|books|books movies music|movies|" +
+    "music|musical instruments|instruments|jewelry|jewelry watches|watches|health beauty|beauty|baby|baby kids|kids|pet supplies|" +
+    "pets|business industrial|office supplies|motors|vehicles|auto parts|parts accessories|tools|tools workshop equipment|" +
+    "crafts|arts crafts|entertainment|family|free|free stuff|garage sale|miscellaneous|misc|other|stuff|things|deals|" +
+    "all|everything|for sale|electronics accessories|video gaming|gaming|tv|tvs|audio|tv audio|tv video home audio").split("|"));
+  R.broadQuery = (q) => {
+    const words = R.normTitle(q).replace(/\b(and|amp)\b/g, " ").replace(/\s+/g, " ").trim();
+    return !!words && BROAD.has(words);
+  };
+
+  // Cars, trucks, motorcycles, campers and boats: eBay sales are few, mostly auctions and far from a local sale, and
+  // what a vehicle is worth turns on its year, mileage, trim and title, so a median of eBay sales would mislead. They
+  // get no typical price (the scam marks still work); parts, accessories and toys for them do ("civic floor mats",
+  // "for f150", "hot wheels mustang"). (dabloonery, 2026-11-18, from the competitor audit.)
+  const MAKES = "toyota|honda|ford|chevy|chevrolet|nissan|jeep|dodge|gmc|subaru|hyundai|kia|mazda|volkswagen|vw|bmw|mercedes|" +
+    "mercedes benz|audi|lexus|acura|infiniti|tesla|buick|cadillac|chrysler|mitsubishi|volvo|porsche|land rover|range rover|" +
+    "harley|harley davidson|kawasaki|ducati|polaris|can am|winnebago|airstream";
+  // Makes that also name other things (RAM memory, a Mini fridge, Yamaha keyboards, Sega Saturn and Genesis, a
+  // Fender Mustang): a vehicle only with a year or a vehicle word.
+  const MAKES_UNSURE = "ram|mini|yamaha|suzuki|saturn|genesis|mercury|lincoln|mustang|jaguar|fiat|pontiac|smart|scion|triumph|indian";
+  const MODELS = "civic|accord|camry|corolla|tacoma|tundra|4runner|rav4|rav 4|prius|highlander|sienna|f150|f 150|f250|f 250|f350|f 350|" +
+    "silverado|wrangler|grand cherokee|tahoe|suburban|altima|sentra|outback|forester|crv|cr v|elantra|sonata|impala|malibu|" +
+    "equinox|durango|dodge charger|corvette|camaro|model 3|model y|sportster|softail|mini cooper|ram 1500|ram 2500|ram 3500|maverick|raptor|bronco";
+  const VEHICLE_WORDS = "car|cars|truck|trucks|pickup|suv|sedan|coupe|minivan|motorcycle|motorbike|dirt bike|dirtbike|" +
+    "moped|atv|utv|side by side|rv|camper|travel trailer|motorhome|boat|pontoon|jet ski";
+  // Anything for a vehicle or about one is priced as usual.
+  const NOT_VEHICLE = new RegExp("(?:^|\\s)(?:for|fits|fit|compatible|parts?|mats?|floor|liners?|headlights?|taillights?|lights?|" +
+    "bumpers?|mirrors?|wheels?|rims?|tires?|tyres?|hubcaps?|covers?|seat|seats|keys?|fob|remote|radio|stereo|speakers?|manual|" +
+    "engine|motor|transmission|doors?|hood|grille|battery|charger|emblem|decals?|stickers?|toy|toys|diecast|die cast|hot wheels|" +
+    "matchbox|lego|model kit|kit|rc|1 18|1 24|1 43|1 64|shirt|hat|jacket|poster|book|filters?|brakes?|rack|hitch|tonneau|" +
+    "case|mount|cable|adapter|dash|cam|camera|gps|helmet|gloves|trailer hitch|ramp|ramps|jack|tool|tools|car seat|stroller|" +
+    "wash|wax|vacuum|charging|ev charger|sign|neon|clock|memory|ddr\\d?|gb|keyboard|piano|guitar|amp|console|game|games|generator|mower|lawn|pressure washer|tiller|snowblower|snow blower|pool|bicycle|" +
+    "outboard|forklift|tailgate|intake|exhaust|muffler|tops?|hardtop|hard top|soft top|roof|awning|shell|flaps|anchor|" +
+    "toolbox|keychain|key chain|puzzle|boots|shoes|prints?|dvd|movie|connector|spoiler|axle|suspension|shocks|struts|" +
+    "radiator|alternator|starter|ecu|carburetor|catalytic|converter|sensor|pump|belt|hose|gauge|cluster|grill|" +
+    "tonka|barbie|power wheels|peg perego|little tikes|cozy coupe|ride on|kids|toddler|plush|ornament|figure)(?:\\s|$)");
+  // What a vehicle's own ad says besides its make and model: trims, drive, engine, title and mileage words. A query
+  // with more than a word or two left after these (more with a year or mileage) is about something else: a part,
+  // a toy, a print ("Subaru Outback roof rack", "Ford Bronco puzzle").
+  const VEHICLE_DESC = new RegExp("^(?:\\d+k?|k|miles?|mileage|mi|low|high|clean|salvage|rebuilt|title|runs|running|great|good|excellent|" +
+    "condition|used|new|only|obo|for|sale|one|owner|lx|ex|exl|ex l|dx|si|se|le|xle|sr5|trd|xlt|lariat|limited|sport|touring|base|premium|" +
+    "platinum|denali|rubicon|sahara|laramie|ltz|lt|ls|ss|rs|gt|gts|s|sx|crew|cab|extended|regular|double|quad|dr|door|4x4|4wd|awd|2wd|fwd|rwd|" +
+    "v6|v8|v10|turbo|diesel|hybrid|electric|automatic|auto|stick|long|range|standard|performance|plaid|cc|hp|ft|foot|feet|white|black|" +
+    "silver|gray|grey|red|blue|green)$");
+  const VEHICLE_YEAR = /(?:^|\s)(?:19[5-9]\d|20[0-3]\d)(?:\s|$)/;
+  const wordsRe = (list) => new RegExp(`(?:^|\\s)(?:${list})(?:\\s|$)`);
+  const MAKE_RE = wordsRe(MAKES), UNSURE_RE = wordsRe(MAKES_UNSURE), MODEL_RE = wordsRe(MODELS), VWORD_RE = wordsRe(VEHICLE_WORDS);
+  // Every make, model and vehicle word, longest first ("mercedes benz" before "mercedes"), to take out of a query.
+  const VEHICLE_NAMES = new RegExp(`\\s(?:${[MAKES, MAKES_UNSURE, MODELS, VEHICLE_WORDS].join("|").split("|").sort((a, b) => b.length - a.length).join("|")})(?=\\s)`, "g");
+  R.vehicleQuery = (q) => {
+    const t = R.normTitle(String(q ?? "").replace(/(?:^|\s)-\S+/g, " "));
+    // "Dodge Charger" is a car, not a phone charger.
+    if (!t || NOT_VEHICLE.test(t.replace(/(?:^|\s)dodge charger(?:\s|$)/, " dodge "))) return false;
+    const signal = MAKE_RE.test(t) || MODEL_RE.test(t) || VWORD_RE.test(t) || (UNSURE_RE.test(t) && VEHICLE_YEAR.test(t));
+    if (!signal) return false;
+    const strong = VEHICLE_YEAR.test(t) || /(?:^|\s)(?:\d+k|miles?|mileage)(?:\s|$)/.test(t);
+    const named = ` ${t} `.replace(VEHICLE_NAMES, " ");
+    const left = named.split(" ").filter((w) => w && !VEHICLE_DESC.test(w));
+    return left.length <= (strong ? 2 : 1);
+  };
+  R.VEHICLE_NOTE = "Tirekick doesn't price cars, trucks, motorcycles or boats: a vehicle's worth turns on its year, mileage, trim and title, and eBay's few sales of them would mislead. Check a vehicle price guide. The scam marks still work.";
+
+  // ---------- the Marketplace chat you have open (opt in: the "chatCheck" setting) ----------
+  // The lines scammers send once you message them, which a listing's own text rarely says: a verification code
+  // (the Google Voice scam), money before you've seen it, a payment trick (a Zelle "business upgrade", an
+  // overpayment to refund, a PayPal invoice to your email), a courier or "agent" for a seller who's away, and a
+  // move to WhatsApp or Telegram. Returns the reasons as short phrases, most serious first, or [] for none.
+  // Read on the screen only: nothing in a chat is kept or sent anywhere (dabloonery, 2026-11-18, competitor audit).
+  const CHAT_SIGNS = [
+    ["asks for a verification code", /\b(?:verification|verify|confirmation|security|6[\s-]?digit|six[\s-]digit)\s+code\b|\b(?:send|give|tell|read)\s+(?:me\s+)?(?:the|that|this|your)\s+(?:\d[\s-]?digit\s+)?code\b|\bcode\s+(?:i|google|facebook)\s+(?:just\s+)?(?:sent|texted)\b/i],
+    ["asks for money before you see it", /(?<!\b(?:no|without|don'?t\s+(?:need|want|take)|do\s+not\s+(?:need|want|take)|not\s+asking\s+for)\s+(?:a\s+|any\s+)?)\bdeposit\b(?!\s+(?:needed|required|necessary))(?![^.!?\n]{0,30}\b(?:back|returned|refund))|\bpay\s+(?:me\s+)?(?:first|upfront|up\s+front|in\s+advance|before\s+(?:you|we|i|pick|meet|see))|\bsend\s+(?:me\s+)?(?:half|the\s+money|the\s+payment|payment|money)\s+(?:first|now|before|to\s+hold)|\bto\s+hold\s+it\s+for\s+you\b/i],
+    ["mentions a payment trick", /\bzelle\b[^.!?\n]{0,60}\b(?:business|upgrade|limit)\b|\b(?:business|upgrade)\b[^.!?\n]{0,40}\bzelle\b|\boverpa(?:y|id|yment)\b|\brefund\s+(?:me\s+)?the\s+(?:difference|extra|balance)\b|\b(?:invoice|payment\s+request)\b[^.!?\n]{0,40}\b(?:e-?mail|paypal)\b|\b(?:e-?mail|paypal)\b[^.!?\n]{0,40}\binvoice\b|\b(?:cashier'?s?|certified)\s+check\b|\bgift\s?cards?\b/i],
+    ["mentions a courier, an agent or a delivery fee", /\b(?:courier|shipping\s+(?:agent|company)|my\s+(?:agent|mover|movers))\b[^.!?\n]{0,60}\b(?:pick|collect|deliver|bring|ship)|\bi(?:'m|\s+am)\s+(?:out\s+of\s+(?:town|state|the\s+country)|away|deployed|offshore|at\s+sea|working\s+abroad)\b[^.!?\n]{0,80}\b(?:ship|deliver|courier|send\s+it)|\b(?:delivery|shipping|insurance)\s+fee\b/i],
+    ["wants to move to another app", /\bwhats\s?app\b|\btelegram\b|\bsignal\s+app\b|\bwechat\b|\btext\s+me\s+(?:at|on)\b/i],
+  ];
+  R.chatSigns = (text = "") => {
+    const t = String(text ?? "").replace(/\u00a0/g, " ");
+    if (!t.trim()) return [];
+    return CHAT_SIGNS.filter(([, re]) => re.test(t)).map(([why]) => why);
+  };
+  R.chatNote = (why = []) => why.length
+    ? `Careful: this chat ${why.length > 1 ? `${why.slice(0, -1).join(", ")} and ${why.at(-1)}` : why[0]}. Those are common scam lines. Never share a code sent to your phone, pay before you see it, or leave Marketplace to deal.`
+    : "";
+
+  // A photo can only pull a verdict down (or mark it suspicious), never talk it up.
+  R.adjustedVerdict = (base, score, photos) => {
+    if (base === "suspicious") return base;
+    if (photos.some((p) => p.matchesTitle === "no")) return "suspicious";
+    const cap = score < 45 ? 0 : score < 60 ? 1 : score < 75 ? 2 : 3;
+    const rank = Math.min(R.RANK[base] ?? 1, cap);
+    return Object.keys(R.RANK).find((k) => R.RANK[k] === rank);
+  };
+
+  // ---------- words ----------
+  // Words work like an eBay search: "dmg -case -game" needs dmg and drops anything with case or game;
+  // "a/b" is either; quotes keep a phrase together.
+  const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // "charger/adapter" = either word. Matches whole words, so "repro" doesn't catch "reproduced".
+  // Accents are ignored on both sides, and a word's edges are any non-letter in any alphabet (so "mara"
+  // doesn't match inside "cámara").
+  const wordRe = new Map(); // a word -> its pattern, made once
+  R.hasWord = (text, w) => {
+    const t = R.fold(text);
+    return String(w).split("/").some((alt) => {
+      const a = R.fold(alt).trim();
+      if (!a) return false;
+      let re = wordRe.get(a);
+      if (!re) {
+        if (wordRe.size > 2000) wordRe.clear();
+        wordRe.set(a, (re = new RegExp(`(^|[^\\p{L}\\p{N}])${reEscape(a)}($|[^\\p{L}\\p{N}])`, "u")));
+      }
+      return re.test(t);
+    });
+  };
+  // A quote left open ('"must go') reads as the words in it, not as a word that starts with a quote mark
+  // (which nothing has, so every listing would be filtered out).
+  R.quickTerms = (words) =>
+    [...(typeof words === "string" ? words : "").matchAll(/(-?)"([^"]+)"|(-?)(\S+)/g)]
+      .map((m) => ({ not: !!(m[1] || m[3]), w: (m[2] || m[4] || "").replace(/"/g, "").trim().toLowerCase() }))
+      .filter((t) => t.w && t.w !== "-");
+  // Why `text` fails a line of words ("" if it passes).
+  R.termsReason = (text, words) => {
+    for (const t of R.quickTerms(words)) {
+      if (t.not && R.hasWord(text, t.w)) return `“${t.w}”`;
+      if (!t.not && !R.hasWord(text, t.w)) return `no “${t.w}”`;
+    }
+    return "";
+  };
+
+  // The filter bar: words (title and card text), a price range (shipping included when the card shows it),
+  // "seen before", and broken listings ("hide" drops them, "only" keeps just those).
+  // query: the page's search, for "Hide accessories" (a game, case or part for what you searched, R.accessoryOf).
+  R.quickReason = (f, quick, query = "") => {
+    const why = R.termsReason(`${f.title || ""} ${f.text || ""}`, quick.words);
+    if (why) return why;
+    const p = f.total ?? f.price;
+    if (quick.min > 0 && p != null && p < quick.min) return `under $${quick.min}`;
+    if (quick.max > 0 && p != null && p > quick.max) return `over $${quick.max}`;
+    if (quick.fresh && f.known) return "seen before";
+    if (quick.broken === "only" && !f.project) return "not broken";
+    if (quick.broken === "hide" && f.project) return `“${f.project}”`;
+    if (quick.junk) {
+      const off = R.offTopic(f);
+      if (off) return `off-topic: ${off}`;
+    }
+    if (quick.parts && !f.ownMarket) {
+      const part = R.accessoryOf(f.title, query);
+      if (part) return `accessory or part: ${part}`;
+    }
+    return "";
+  };
+
+  // Off-topic: a card that isn't an item for sale, the clutter of a browse feed like the Marketplace home
+  // page. Rentals and housing, services (massage, cleaning, hair), jobs, pets, "looking for" posts, and $0–$1
+  // placeholder prices on something that isn't free. Returns a short reason, or "" for an ordinary listing.
+  // Kept narrow on purpose: a word that also names an item ("apartment-size fridge", "kitten heels") doesn't count.
+  const OFF = [
+    ["wanted post", /^(?:looking for|lf\b|wtb\b|iso\b|in search of|searching for|seeking|need(?:ing)? (?:a|an|someone|help)\b|wanted\b)|\b(?:looking to (?:rent|buy)|want to buy)\b/i],
+    ["rental", /\b(?:for rent|for lease|rentals?|rent to own|room(?:s)? (?:for|available)|roommate|sublease|sublet|casita|\d\s?(?:bd|br|bed(?:room)?s?)\b.*\b(?:\d\s?(?:ba|bath)s?|rent|house|home|apt)|apartments? (?:for|available)|house for|move[- ]in)\b/i],
+    ["service", /\b(?:massages?|massage therapy|cleaning services?|house cleaning|handyman|lawn (?:care|service|mowing)|landscaping services?|hair (?:braid(?:ing|s)?|stylist)|lash(?:es)? (?:extensions?|tech)|nail tech|tattoos? (?:artist|shop)|tutor(?:ing)?|photography services?|dj services?|junk removal|moving services?|services? (?:available|offered)|we (?:buy|fix|repair|clean|install)|free (?:estimate|quote)s?|call (?:now|today)|now booking|book (?:now|today|your))\b/i],
+    ["job", /\b(?:now hiring|we(?:'re| are) hiring|hiring|job (?:opening|opportunity)|positions? available|work from home|earn \$|make money)\b/i],
+    ["pets", /\b(?:kittens?|puppies|puppy|rehom(?:e|ing)|for adoption|adopt me)\b(?!.*\b(?:food|toys?|beds?|crate|cage|carrier|collar|leash|supplies|figure|plush|heels)\b)/i],
+    ["adult", /\b(?:escorts?|sugar (?:daddy|baby|mama)|onlyfans|companionship|feel (?:good|relaxed) tonight|incall|outcall)\b/i],
+  ];
+  const THING = /\b(?:chairs?|guns?|tables?|pillows?|cushions?|seats?|pads?|devices?|machines?|massagers?|kits?|books?|dvds?)\b/i; // "massage chair" is an item
+  // A stand-in asking price: "$1" (a real "ds" search had 9 of them, each read as too cheap), "$1234", "$12,345", "$1111", "$99999" (sellers use them to mean "message me").
+  // Compared with sold prices one read "$12263 above typical" (real-site check, 0.49.1), so it gets no
+  // price comparison and says what it is instead.
+  R.placeholderPrice = (price) => {
+    if (!(price > 0)) return false;
+    const d = String(Math.round(price));
+    return price === 1 || (d.length >= 4 && "1234567890".startsWith(d)) || /^1{4,}$|^9{5,}$/.test(d);
+  };
+  // So far from the typical price (20 times or more) that the two can't be about the same thing: a different
+  // item in the search, or a stand-in price. Either way a dollar gap would mislead.
+  R.tooFarToCompare = (price, typical) => R.placeholderPrice(price) || (price > 0 && typical > 0 && price >= typical * 20);
+  R.offTopic = (f = {}) => {
+    const t = `${f.title || ""}`;
+    for (const [why, re] of OFF) if (re.test(t) && !(why === "service" && THING.test(t))) return why;
+    if (f.price != null && f.price > 0 && f.price <= 1) return "$1 placeholder";
+    if (R.placeholderPrice(f.price)) return "placeholder price";
+    return "";
+  };
+
+  // A free read of a listing before any AI: one word from what's known without a model (sold prices,
+  // scam signs, the seller, off-topic). null when there's nothing to go on. `v` uses the verdict names so
+  // it takes their colors and glyphs; `rank` sorts unscored listings (higher first).
+  R.freeRead = (f = {}, market) => {
+    const cheap = f.vsSold != null ? R.tooCheap(f, market) : null;
+    const said = f.vsSold != null && !cheap ? R.cheapForReason(f, market) : null; // cheap, and says why: still backs a code
+    if (R.likelyScam(f) || R.codeBacked(f, cheap || said) || cheap?.level === "far") return { v: "suspicious", word: "Likely scam", rank: -2 };
+    if (f.photoTwins || f.sellerWarn || (f.offSite && !f.offSiteOk) || cheap || f.dup || (f.titleCode && !f.codeOk)) return { v: "suspicious", word: "Check first", rank: -1 };
+    const off = R.offTopic(f);
+    if (off) return { v: "pass", word: "Off-topic", rank: -1 };
+    // A broken or untested one is compared with working ones' prices: cheap for a reason, so no price word. So is
+    // one that says why it's cheap (a flaw, something missing): it isn't a great price on the thing searched for.
+    if (f.vsSold == null || f.project || said) return f.drop ? { v: "good", word: "Price dropped", rank: 1 } : null;
+    return R.priceWord(f.vsSold);
+  };
+
+  // Where "best first" puts a listing that has no score (no AI, or not scanned yet), as a shelf (lower first) and
+  // the price against typical within it (lower first; Infinity when there's none, and then the store's order
+  // stands). Testers found the old order random (dabloonery, 2026-10-24): it went by the free read's word alone,
+  // so two "Fair price" cards kept the store's order whatever their prices, and a game, a case, a broken one and
+  // an auction sat above the console itself whenever it was a little over typical. The shelves:
+  //   0 a price word (Great, Good, Fair), furthest below typical first
+  //   1 the thing searched for with no price to set against typical (auction, lot, no lookup yet); a drop first
+  //   2 above typical, closest first
+  //   3 broken or for parts (unless you want those: opts.broken)
+  //   4 not your search: an accessory, part or game for it, another thing, off-topic
+  //   5 Check first (a warning), and 6 Likely scam (the Skips and scams setting places those anyway)
+  // opts.prices false (price marks turned off): no shelf by price, since the list wouldn't show why.
+  // `why` names the shelf in a few words, for the row's hover.
+  R.BEST_WHY = ["a good price for it", "no price to compare yet", "above the typical price", "broken or for parts", "not your search", "a warning to check", "a likely scam"];
+  R.bestPlace = (f = {}, market, { query = "", prices = true, broken = false } = {}) => {
+    const read = R.freeRead(f, market);
+    const place = (shelf, vs = Infinity) => ({ shelf, vs, drop: f.drop ? 1 : 0, why: R.BEST_WHY[shelf] });
+    if (read?.word === "Likely scam") return place(6);
+    if (read?.word === "Check first") return place(5);
+    const other = R.offSearch(f.title, query) && !R.spelledNear(f.title, query);
+    if (read?.word === "Off-topic" || f.accessory || f.related === false || other || (market?.median > 0 && R.tooFarToCompare(f.price ?? f.total, market.median))) return place(4);
+    if (f.project && !broken) return place(3);
+    const vs = prices && f.vsSold != null && !f.project ? f.vsSold : null;
+    if (vs == null || read?.rank == null || read.word === "Price dropped") return place(1);
+    return place(read.rank > 0 ? 0 : 2, vs);
+  };
+  // A title with a word of the search spelled a letter off ("Dumbbell Set" in a real "dumbells" search, where
+  // Marketplace showed dumbbells all the same): the search's thing for sorting, though offSearch still keeps it out
+  // of the price check. Words of five letters or more, one letter added, dropped or changed.
+  const oneOff = (a, b) => {
+    if (Math.abs(a.length - b.length) > 1 || a === b) return a === b;
+    let i = 0;
+    while (i < a.length && a[i] === b[i]) i++;
+    return a.slice(i + (a.length >= b.length ? 1 : 0)) === b.slice(i + (b.length >= a.length ? 1 : 0));
+  };
+  R.spelledNear = (title, query = "") => {
+    const words = searchWords(query).filter((w) => w.length >= 5 && !isSpec(w));
+    const toks = R.normTitle(title).split(" ").map((t) => t.replace(/s$/, ""));
+    return words.some((w) => toks.some((t) => t.length >= 4 && oneOff(t, w.replace(/s$/, ""))));
+  };
+  // Two unscored listings in "best first" order, from their bestPlace: shelf, then price against typical, then
+  // a price drop. 0 keeps the store's order (the sort is stable).
+  R.bestCompare = (a, b) => a.shelf - b.shelf || (a.vs === b.vs ? 0 : a.vs - b.vs) || b.drop - a.drop;
+  // The price against the typical price (the middle of recent eBay sales, or the model's estimate), in dollars:
+  // "$53 below typical", "$20 above typical", "about typical" (within 5%). testers found both "65% of sold" and the
+  // word "sold" confusing on a card, so the chip says "typical" and its hover says where that comes from.
+  // `working`: a broken or untested one, compared with what working ones sell for ("$147 below working ones"),
+  // so a for-parts price doesn't read as a bargain on the same thing.
+  R.vsText = (total, ref, { rough = false, est = false, long = false, working = false } = {}) => {
+    if (!(ref > 0) || total == null) return "";
+    const what = working ? (long ? "the typical price of a working one" : "working ones") : long ? "the typical price" : "typical";
+    const d = Math.round(total - ref);
+    const t = Math.abs(total - ref) <= ref * 0.05 ? `about ${what}` : `$${Math.abs(d)} ${d < 0 ? "below" : "above"} ${what}`;
+    return `${rough || est ? "~" : ""}${t}${est ? " (est.)" : ""}`;
+  };
+  // The floor under a broken or untested buy: what it leaves if it can't be fixed and goes back on eBay as it is, at
+  // what broken ones sell for (market.parts, Fix & flip's for-parts lookup), less fees, 40 cents and the shipping
+  // buyers paid. A local find priced under that is worth it even if the repair fails. null without a for-parts price,
+  // a price, or for a lot or an auction (a bid isn't the price).
+  R.asIsMargin = (item, market, feePct = 13.6) => {
+    const pm = market?.parts?.median;
+    if (!(pm > 0) || !item || item.total == null || item.lot || item.auction) return null;
+    const ship = market.parts.ship ?? market.ship ?? 0;
+    return Math.round(pm * (1 - feePct / 100) - 0.4 - (ship > 0 ? ship : 0) - item.total);
+  };
+  R.AS_IS_SHOW = 10; // the panel says it from $10 up: less is within the guess
+
+  // An asking price against what it sells for, for Tirekick's own page (a thrift shelf, a yard sale, a listing on
+  // another site): the buyer's word and the gap, then what reselling it on eBay would leave, the way the panel works
+  // out a Fix & flip margin (fees, 40 cents, the shipping buyers paid). No scam word: there's no listing or seller
+  // to judge, so a price far under says to check it's the same thing. `title`: what was looked up, for its version
+  // (R.forVariant). Returns { v, word, buyer, resell } or null.
+  R.askingRead = (asking, market, { title = "", feePct = 13.6 } = {}) => {
+    if (!(asking >= 0) || !(market?.median > 0)) return null;
+    const m = R.forVariant(market, { title });
+    const rough = m.confidence === "rough";
+    const pw = R.priceWord(asking / m.median);
+    const far = asking < m.median * R.TOO_CHEAP.far ? " Far under it: check it's the same thing, complete and working." : "";
+    const kind = m.variantWords?.length ? ` of the ${m.variantWords.map(R.kindWord).join(", ")} kind` : m.variantUsed ? " naming no other version" : "";
+    const buyer = `${R.vsText(asking, m.median, { rough, long: true })} (${R.dollars(Math.round(m.median))}, from ${m.n} eBay sales${kind}).${far}`;
+    const ship = m.ship > 0 ? m.ship : 0;
+    const net = Math.round(m.median * (1 - feePct / 100) - 0.4 - ship - asking);
+    const resell = `Resell on eBay: ~${R.dollars(Math.abs(net))} ${net >= 0 ? "margin" : "loss"} after ${feePct}% fees${ship ? ` and ${R.dollars(ship)} shipping` : ""} (est.)`;
+    return { v: pw.v, word: pw.word, buyer: buyer.charAt(0).toUpperCase() + buyer.slice(1), resell };
+  };
+  // The flip check (Tirekick's own page, the reseller workbench): the most worth paying to keep the profit you want
+  // after reselling on eBay at the typical price (fees, 40 cents, the shipping buyers paid, parts you'll put in),
+  // and a plain call against an asking price: Buy at or under it, Offer when a friendly offer at it is a fair ask
+  // (at least 70% of the asking price, lower reads as a lowball), Pass otherwise. With no asking price, only the
+  // most to pay. null without a typical price.
+  R.OFFER_FLOOR = 0.7;
+  R.flipCall = (asking, market, { title = "", feePct = 13.6, profit = 20, parts = 0 } = {}) => {
+    if (!(market?.median > 0)) return null;
+    const m = R.forVariant(market, { title });
+    const ship = m.ship > 0 ? m.ship : 0;
+    const want = profit > 0 ? profit : 0;
+    const extra = parts > 0 ? parts : 0;
+    const back = m.median * (1 - feePct / 100) - 0.4 - ship - extra; // what a sale leaves before the price you pay
+    const maxPay = Math.max(0, Math.floor(back - want));
+    const rough = m.confidence === "rough";
+    const costs = `${feePct}% fees${ship ? `, ${R.dollars(ship)} shipping` : ""}${extra ? `, ${R.dollars(extra)} parts` : ""}`;
+    const basis = `Resold at ${rough ? "about " : ""}${R.dollars(Math.round(m.median))} on eBay, less ${costs}.`;
+    const out = { maxPay, offer: null, call: null, net: null, word: "", why: "", basis, rough };
+    if (asking == null || asking === "" || !(asking >= 0)) return out;
+    const net = Math.round(back - asking);
+    out.net = net;
+    const left = `${R.dollars(Math.abs(net))} ${net >= 0 ? "profit" : "loss"}`;
+    if (maxPay > 0 && asking <= maxPay) return { ...out, call: "buy", word: "Buy", why: `At ${R.dollars(asking)} it leaves about ${left}${net > want ? `, ${R.dollars(net - want)} more than you want` : ""}.` };
+    const offer = maxPay > 0 ? R.roundOffer(maxPay) : 0;
+    if (offer > 0 && offer >= asking * R.OFFER_FLOOR)
+      return { ...out, call: "offer", offer, word: `Offer ${R.dollars(offer)}`, why: `At the ${R.dollars(asking)} asking price it leaves about ${left}. At ${R.dollars(offer)} you'd keep your ${R.dollars(want)}.` };
+    return {
+      ...out,
+      call: "pass",
+      word: "Pass",
+      why: maxPay > 0
+        ? `It would need to be ${R.dollars(maxPay)} or less for your ${R.dollars(want)}, too far under the ${R.dollars(asking)} asking price for an offer.`
+        : `Even at $0 a resale wouldn't leave your ${R.dollars(want)}.`,
+    };
+  };
+  // Questions for the seller and a safety checklist for you (the workbench on Tirekick's own page): plain templates,
+  // free and predictable, your AI isn't used. The questions are a message to copy; the checklist is for you. A thing
+  // that plugs in or charges gets asked about power and a photo of it on; anything gets asked what's missing.
+  R.POWERED = /\b(?:console|switch|playstation|ps[2-5]|xbox|game ?boy|3ds|wii|gamecube|nintendo|ipod|iphone|ipad|phone|tablet|laptop|macbook|computer|pc|monitor|tv|television|camera|drone|speaker|amp|amplifier|receiver|turntable|record player|radio|stereo|headphones|airpods|watch|garmin|fitbit|printer|router|gpu|graphics card|cpu|keyboard|synth|guitar pedal|mixer|blender|vacuum|dyson|roomba|drill|saw|mower|trimmer|e-?bike|scooter|battery|charger|kindle|projector|microwave|espresso|coffee maker)\b/i;
+  R.sellerQuestions = (title = "") => {
+    const t = String(title).trim().replace(/\s+/g, " ").slice(0, 80);
+    const powered = R.POWERED.test(t);
+    const qs = [
+      powered ? "Does everything work? Could you send a photo of it switched on?" : "Is there any damage, wear or repairs I should know about?",
+      powered ? "Is anything not working, missing or repaired?" : null,
+      "What comes with it? Anything missing, like parts, cables, a case or the box?",
+      "How long have you had it, and why are you selling?",
+      "Could you send a photo of the model or serial number label?",
+      "Can I see it working, or look it over, before I pay?",
+    ].filter(Boolean);
+    return `Hi! A few questions about ${t ? `the ${t}` : "it"}:\n${qs.map((q) => `- ${q}`).join("\n")}\nThanks!`;
+  };
+  R.SAFETY = [
+    "Meet somewhere public in daylight, such as a police station's safe exchange spot. Bring someone if you can.",
+    "Look it over and see it working before you pay. Check the model and serial number match the listing.",
+    "Pay when you have it in hand: cash, or a payment app with purchase protection. Never ahead, never by gift card or wire.",
+    "Keep the chat on the site. Don't move to text, email or another app, and never share a code someone texts you.",
+    "Walk away if the story changes, the price drops a lot for no reason, or you're being rushed.",
+  ];
+  R.safetyText = () => `Before you meet:\n${R.SAFETY.map((s) => `- ${s}`).join("\n")}`;
+
+  // ---------- the sell helper (Tirekick's own page): pricing something you want to sell ----------
+  // Every price here comes from what it sold for on eBay (a market from the sold lookup), never from a model's
+  // memory: a confident wrong number is the worst thing this could show. Plan: docs/ROADMAP.md, "Sell helper".
+  // A nice price to ask: whole dollars under $20, fives under $100, tens above (as R.roundOffer, but to the nearest).
+  R.nicePrice = (n) => {
+    if (!(n > 0)) return 0;
+    const step = n < 20 ? 1 : n < 100 ? 5 : 10;
+    return Math.max(step, Math.round(n / step) * step);
+  };
+  // Three prices for something you're selling, from its eBay sales (for its version, R.forVariant):
+  // - listAt: where to start, a little over typical (towards the dearer quarter of sales) to leave room for offers;
+  // - fast: about the cheaper quarter of sales, for a quick sale;
+  // - floor: the least to take and still keep `profit` after what you paid, parts, fees, 40 cents and the shipping
+  //   buyers paid (the flip check's sums run backwards). Only with `paid`; null otherwise.
+  // Each comes with `keep`, what a sale at it leaves you. Prices include shipping, as sold totals do (free shipping).
+  // `local` (a pickup sale: no fees, no shipping) is worked out from the title when not given: big things (R.bulky)
+  // sell locally, at what local sales of them fetch (R.LOCAL_NET, R.BULKY_LOCAL). `broken` prices it at what broken
+  // ones sold for (market.parts), when the lookup had enough of them. null without a typical price.
+  R.sellPrices = (market, { title = "", feePct = 13.6, paid = null, profit = 0, parts = 0, broken = false, local = null } = {}) => {
+    if (!(market?.median > 0)) return null;
+    const asBroken = broken && market.parts?.median > 0;
+    const m = asBroken ? { ...market.parts, confidence: market.parts.confidence || "rough" } : R.forVariant(market, { title });
+    const bulky = R.bulky(title, market.query);
+    const pickup = local ?? bulky;
+    const localNet = R.localNet(feePct);
+    const cut = pickup ? (bulky ? localNet * R.BULKY_LOCAL : localNet) : 1;
+    const ship = pickup ? 0 : m.ship > 0 ? m.ship : market.ship > 0 ? market.ship : 0;
+    const fee = pickup ? 0 : Math.min(Math.max(feePct, 0), 50) / 100;
+    const cost = (paid > 0 ? paid : 0) + (parts > 0 ? parts : 0);
+    const typical = m.median * cut;
+    const clamp = (n, lo, hi) => Math.min(Math.max(n, lo), hi);
+    const keep = (p) => Math.round(p * (1 - fee) - (pickup ? 0 : 0.4) - ship - cost);
+    const listAt = R.nicePrice(clamp(m.p75 > 0 ? m.p75 * cut : typical * 1.15, typical * 1.05, typical * 1.25));
+    let fast = R.nicePrice(clamp(m.p25 > 0 ? m.p25 * cut : typical * 0.9, typical * 0.8, typical * 0.95));
+    if (fast >= listAt) fast = Math.max(1, listAt - (listAt < 20 ? 1 : listAt < 100 ? 5 : 10));
+    const want = profit > 0 ? profit : 0;
+    const floor = paid == null || paid === "" || !(paid >= 0) ? null : Math.ceil((want + cost + (pickup ? 0 : 0.4) + ship) / (1 - fee));
+    const rough = m.confidence === "rough";
+    const put = cost ? `the ${R.dollars(Math.round(cost))} you put in` : "";
+    const after = pickup
+      ? ` Priced for local pickup (${bulky ? "big things sell for less locally" : "no fees to pass on"}): no fees or shipping${put ? `, less ${put}` : ""}.`
+      : ` What you keep is after ${feePct}% fees${ship ? `${put ? "," : " and"} ${R.dollars(Math.round(ship))} shipping` : ""}${put ? ` and ${put}` : ""}.`;
+    const basis = `From ${m.n ? `${m.n} ` : ""}eBay sales${asBroken ? " of broken ones" : ""} at ${rough ? "about " : ""}${R.dollars(Math.round(m.median))}.${after}`;
+    return {
+      typical: Math.round(typical),
+      listAt: { price: listAt, keep: keep(listAt) },
+      fast: { price: fast, keep: keep(fast) },
+      floor: floor == null ? null : { price: floor, keep: keep(floor) },
+      // what you'd want for it is more than it sells for: say so instead of a floor over the asking prices
+      under: floor != null && floor > listAt,
+      local: pickup,
+      broken: asBroken,
+      rough,
+      basis,
+    };
+  };
+  // Where to sell it, in a few words: big things locally, small cheap things locally or in a lot (fees and
+  // shipping take most of a small sale), the rest on eBay shipped. Clothes and shoes get Vinted as well: it charges
+  // sellers no fee (the buyer pays its protection fee). { where: "local" | "small" | "ebay", why }.
+  R.SMALL_SALE = 15;
+  const CLOTHES = /\b(?:shirts?|t-?shirts?|tees?|blouses?|jeans|pants|trousers|shorts|skirts?|dress(?:es)?|jackets?|coats?|hoodies?|sweaters?|sweatshirts?|cardigans?|vests?|leggings|sneakers|trainers|shoes|boots|heels|sandals|loafers|handbags?|purses?|backpacks?|scarf|scarves|beanies?|hats?|caps?|jerseys?)\b/i;
+  R.clothes = (...texts) => CLOTHES.test(texts.filter(Boolean).join(" "));
+  R.sellWhere = (title = "", typical = 0, { local = null } = {}) => {
+    const clothes = R.clothes(title) ? " Clothes and shoes sell on Vinted too, which charges sellers no fee." : "";
+    if (local ?? R.bulky(title))
+      return { where: "local", why: `Big to ship: sell it for local pickup on Marketplace or Craigslist, cash in hand.${clothes}` };
+    if (typical > 0 && typical < R.SMALL_SALE)
+      return { where: "small", why: `Fees and shipping would take most of a sale this small: sell it locally, or in a lot with similar things.${clothes}` };
+    return { where: "ebay", why: `Ships easily: eBay reaches the most buyers. Marketplace works too, for cash with no fees.${clothes}` };
+  };
+  // The details that move the price, to settle before trusting it: a 13 isn't a 13 Pro, 128GB isn't 512GB. What a
+  // photo or a short description can't show. Plain questions, worked out from the words; always ends with whether it
+  // works and what comes with it.
+  const BIKE_ASK = /\b(?:bike|bicycle|e-?bike)\b/i;
+  const ASKS = [
+    [/\b(?:iphone|galaxy|pixel|oneplus|motorola|moto g)\b/i, ["The exact model (a 13 or a 13 Pro, say)", "Storage (GB)", "Unlocked or tied to a carrier", "Battery health, if it shows it"]],
+    [/\b(?:ipad|tablet|kindle|surface)\b/i, ["The exact model or generation", "Storage (GB)", "Wi-Fi only or cellular"]],
+    [/\b(?:console|switch|playstation|ps[345]|xbox|wii|game ?boy|3ds|ds lite|steam deck)\b/i, ["The exact model (original, Lite, OLED, Slim, Pro…)", "Storage", "Controllers, cables and games included"]],
+    [/\b(?:laptop|macbook|notebook|chromebook|thinkpad|desktop|imac|mac mini|computer|pc)\b/i, ["The processor or chip, and the year", "Memory (RAM) and storage", "Battery cycles or health"]],
+    [/\b(?:gpu|graphics card|rtx|gtx|radeon|rx \d)\b/i, ["The exact card (a 3060 or a 3060 Ti, say) and its memory"]],
+    [/\b(?:camera|dslr|mirrorless|canon|nikon|sony a\d|fujifilm|pentax|minolta|olympus|leica|polaroid|gopro|lens)\b/i, ["Body only or with a lens (which one)", "The shutter count, if you can see it"]],
+    [/\b(?:watch|garmin|fitbit)\b/i, ["The model and size (mm)", "GPS only or cellular"]],
+    [/\b(?:airpods|headphones|earbuds|beats|bose)\b/i, ["The exact model or generation", "The case and charger included"]],
+    [BIKE_ASK, ["The brand, model and frame size", "The year, if you know it"]],
+    [CLOTHES, ["The brand", "The size", "How worn: new with tags, like new or used"]],
+  ];
+  R.sellAsks = (title = "") => {
+    const t = String(title);
+    // a bike's questions are for a bike, not a bike light or helmet
+    const found = ASKS.find(([re]) => re.test(t) && (re !== BIKE_ASK || R.bulky(t)));
+    return [...(found ? found[1] : ["The brand and exact model, if it has one"]), "Does everything work? Anything broken, worn or repaired?", "What comes with it (box, cables, accessories)?"];
+  };
+  // Photos to take and what to say in the listing: the buyer's questions answered up front (R.sellerQuestions from the
+  // other side), so fewer messages and fewer returns. Templates, your AI isn't used.
+  R.sellTips = (title = "") => {
+    const powered = R.POWERED.test(String(title));
+    return [
+      powered ? "A photo of it switched on and working" : "Every side in good light, on a plain background",
+      "Any damage or wear, close up",
+      "Everything that comes with it, laid out together",
+      "The model or serial number label",
+      `Say ${powered ? "what works and what doesn't" : "its condition plainly"}, what's included and why you're selling: it's what buyers ask first.`,
+    ];
+  };
+  // A listing title from the words and the details you settled, in eBay's 80 characters: each word once, brands
+  // spelled their way ("iPhone"), sizes and short codes in capitals ("128GB", "PS5", "RTX"), other words capitalized
+  // unless you typed capitals yourself.
+  R.SELL_TITLE_MAX = 80;
+  const SPELLED = { iphone: "iPhone", ipad: "iPad", ipod: "iPod", imac: "iMac", macbook: "MacBook", airpods: "AirPods", playstation: "PlayStation", xbox: "Xbox", gopro: "GoPro", thinkpad: "ThinkPad", oneplus: "OnePlus", and: "and", with: "with", for: "for", or: "or", of: "of" };
+  const CAPS = /^(?:rtx|gtx|oled|lcd|led|ssd|hdd|gpu|cpu|usb|hdmi|nes|snes|tv|dslr|nwt|nib|xl|xxl|xs|ps|pc)$/i;
+  const titleWord = (w, first) => {
+    const k = w.toLowerCase();
+    if (SPELLED[k] && (first ? !/^(?:and|with|for|or|of)$/.test(k) : true)) return SPELLED[k];
+    if (/^\d+(?:gb|tb)$/i.test(w)) return w.toUpperCase();
+    if (CAPS.test(w) || /^[a-z]{1,3}\d{1,3}[a-z]?$/i.test(w)) return w.toUpperCase(); // "PS5", "S21", "A54", "M2"
+    return w === k ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+  };
+  R.sellTitle = (words = "", details = []) => {
+    const seen = new Set();
+    const out = [];
+    for (const w of [words, ...details].join(" ").split(/\s+/).filter(Boolean)) {
+      const k = w.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const next = titleWord(w, !out.length);
+      if ([...out, next].join(" ").length > R.SELL_TITLE_MAX) break;
+      out.push(next);
+    }
+    return out.join(" ");
+  };
+  // The kinds of chip on a listing, each with its own switch in settings: scam marks (and the warnings that go
+  // with them: a new or low-rated seller, the same title twice), price words, and everything else (new to you,
+  // price drops, auctions, lots, offers). A chip is [kind, text, why, group]; "state" ones (why a listing is
+  // hidden) always show. pickChips keeps the groups that are on and at most markLimit chips: "state" first, then
+  // scam marks, then the rest in the order given, so a short limit never drops a warning for a price word. Scam
+  // marks go only where onCard is set: the panel's list and the listing page always warn, so turning them off
+  // never hides a likely scam everywhere.
+  R.CHIP_GROUPS = ["scam", "price", "other"];
+  // On a likely scam's card (scam: true) only the price warnings stay: a "$102 below typical" under "Likely scam:
+  // off-site contact" reads like a deal. The panel's row keeps the number.
+  R.pickChips = (chips, { markScams = true, markPrices = true, markOther = true, markLimit = 3 } = {}, { onCard = false, scam = false } = {}) => {
+    const on = { scam: markScams || !onCard, price: markPrices, other: markOther };
+    const rank = (c) => (c[3] === "state" ? 0 : c[3] === "scam" ? 1 : 2);
+    const kept = chips.filter((c) => on[c[3]] !== false && !(onCard && scam && c[3] === "price" && c[0] !== "warn")).map((c, i) => [c, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]);
+    return kept.slice(0, Math.max(1, Math.min(3, Math.round(markLimit) || 3))).map(([c]) => c);
+  };
+  // The three focuses at the top of settings, as the switches they set. Scam marks stay on in every one,
+  // and so do the eBay sold lookups the "Too cheap?" and "Likely scam: typical is…" marks need. Marks per listing is
+  // its own choice. focusOf names the focus a set of settings matches, or "custom".
+  R.FOCUS = {
+    everything: { markScams: true, markPrices: true, markOther: true, useAI: true, useSoldComps: true },
+    scams: { markScams: true, markPrices: false, markOther: false, useAI: false, useSoldComps: true },
+    noai: { markScams: true, markPrices: true, markOther: true, useAI: false, useSoldComps: true },
+  };
+  // A setting that isn't stored has its default: every mark and the lookups on, the AI off (it's opt-in).
+  const FOCUS_DEFAULTS = { markScams: true, markPrices: true, markOther: true, useAI: false, useSoldComps: true };
+  R.focusOf = (s = {}) => Object.keys(R.FOCUS).find((name) => Object.entries(R.FOCUS[name]).every(([k, v]) => (s[k] ?? FOCUS_DEFAULTS[k]) === v)) || "custom";
+  R.SOLD_CHIP = / (below|above) (typical|working ones)$|about (typical|working ones)$/; // the cards' price chip, to leave out where it would repeat
+
+  // The price against the sold median, in a word.
+  R.priceWord = (vs) =>
+    vs <= 0.6 ? { v: "great", word: "Great price", rank: 4 }
+    : vs <= 0.8 ? { v: "good", word: "Good price", rank: 3 }
+    : vs <= 1.05 ? { v: "fair", word: "Fair price", rank: 2 }
+    : { v: "pass", word: "Above typical", rank: 0 };
+
+  // A likely scam without asking a model: a reposted listing, a disguised way to get in touch off the site,
+  // or a code on the end of the title with another sign beside it (R.codeBacked). A code on its own is only
+  // "Check first": real model numbers have the same shape ("ThinkPad T480", "Bose QC35", "DeWalt DCD771C2"),
+  // and 17 of 19 ordinary Marketplace titles tried read as one (2026-10-21). A scan clears a code it judges
+  // to be the model number (codeOk).
+  R.likelyScam = (f) => !!(f && (f.campaign || f.offSite?.sure || R.codeBacked(f)));
+  // What backs up a title code, as a few words ("" if nothing does): a price under the typical one (f.cheap,
+  // set by the panel from tooCheap), the same photo on other listings, or a warning about the seller.
+  R.codeBacked = (f, cheap = f?.cheap) => {
+    if (!f?.titleCode || f.codeOk) return "";
+    if (cheap) return "a price far under the typical one";
+    if (f.photoTwins) return "a photo seen on other listings";
+    return f.sellerWarn ? String(f.sellerWarn).toLowerCase().replace(/^seller: /, "a seller with ") : "";
+  };
+  // At or under your price for this search, and not a likely scam (nor a title code no scan has cleared yet).
+  R.isDeal = (f, dealPrice) => dealPrice > 0 && f.total != null && f.total <= dealPrice && !R.likelyScam(f) && !(f.titleCode && !f.codeOk);
+
+  // sellerJoined: the year the seller's account was made, where the site says (Marketplace: "Joined
+  // Facebook in 2026"). An account made this year is how most Marketplace scams start.
+  R.sellerWarning = (f, { minSellerRatings, minSellerPct }, now = Date.now()) => {
+    if (f.sellerCount != null && f.sellerCount < minSellerRatings) return f.sellerCount === 0 ? "New seller" : `Seller: ${f.sellerCount} rating${f.sellerCount === 1 ? "" : "s"}`;
+    if (f.sellerPct != null && f.sellerPct < minSellerPct) return `Seller ${f.sellerPct}% positive`;
+    if (f.sellerJoined >= new Date(now).getFullYear()) return `Account made in ${f.sellerJoined}`;
+    return "";
+  };
+  // A seller sign strict enough to make a low price "Likely scam" (cheapLevel), whatever your own limits for the
+  // Check first warning are: 4 ratings or fewer, under 95% positive, under 98% with fewer than 20 ratings, or an
+  // account made this year. Honest small sellers (6 ratings, all positive) still get the warning, not the mark.
+  // Returns a few words ("a seller with 2 ratings") or "".
+  R.riskySeller = (f, now = Date.now()) => {
+    const n = f?.sellerCount, pct = f?.sellerPct;
+    if (n != null && n <= 4) return n === 0 ? "a new seller" : `a seller with ${n} rating${n === 1 ? "" : "s"}`;
+    if (pct != null && (pct < 95 || (pct < 98 && n != null && n < 20))) return `a seller at ${pct}% positive`;
+    if (f?.sellerJoined >= new Date(now).getFullYear()) return `an account made in ${f.sellerJoined}`;
+    return "";
+  };
+
+  // A price far under what the same thing sells for is the other half of most scams: the bait. Only with
+  // a sold reference worth trusting (not "rough"), and never for what that reference doesn't describe:
+  // auctions (a bid isn't a price), lots, and broken ones (the reference is for working ones).
+  // Returns { level: "far" | "low", pct } or null. Cutoffs in one place so they can be tuned.
+  // Not for something else either: an accessory or part for what was searched (f.accessory, from
+  // accessoryOf) or a listing a scan said isn't what you searched for (related false).
+  // A title that leaves out a word of the search (f.offWords, from missingWord) may be something else that
+  // turned up in it ("Mario Kart 8 Deluxe - Nintendo Switch" in a "switch oled" search), so a price far under
+  // is only "low" (Check first), never "far" (Likely scam) on price alone. Bait copies the search's words.
+  R.TOO_CHEAP = { far: 0.4, low: 0.55 };
+  R.LOCAL_NET = 0.864; // what an eBay seller keeps after fees (13.6%): a pickup seller asking that much nets the same
+  // The same for the fee in settings (feePct), so a changed fee moves the local lines too. 13.6% without one.
+  R.localNet = (feePct) => (Number.isFinite(feePct) && feePct >= 0 && feePct < 100 ? 1 - feePct / 100 : R.LOCAL_NET);
+  // Big things picked up locally (furniture, bikes, big appliances, fitness machines): eBay's sales of them reach the
+  // whole country and often include freight, so honest local prices run well under them (an Aeron chair at $120 on
+  // Marketplace against $450 sold on eBay). On a local site the too-cheap lines are this much lower for them
+  // (dabloonery, 2026-11-03): bait at a fifth of the price is still marked, a quick local sale isn't.
+  R.BULKY_LOCAL = 0.6;
+  const BULKY = new RegExp(String.raw`\b(?:sofas?|couch(?:es)?|sectionals?|loveseats?|recliners?|futons?|ottomans?|armchairs?|chairs?|desks?|` +
+    String.raw`(?:dining|coffee|kitchen|end|side|patio|picnic|pool|ping pong) tables?|dressers?|nightstands?|bed ?frames?|bunk beds?|mattress(?:es)?|headboards?|` +
+    String.raw`bookcases?|bookshelf|bookshelves|shelving|cabinets?|armoires?|wardrobes?|hutch|credenzas?|tv stands?|benches|cribs?|` +
+    String.raw`bikes?|bicycles?|e-?bikes?|treadmills?|ellipticals?|rowing machines?|home gym|squat rack|weight bench|` +
+    String.raw`washers?|dryers?|fridges?|refrigerators?|freezers?|stoves?|dishwashers?|grills?|smokers?|(?:lawn |riding )?mowers?|snow ?blowers?|` +
+    String.raw`kayaks?|canoes?|pianos?|hot tubs?|aeron|herman miller|steelcase|kallax|hemnes|ektorp)\b`, "i");
+  // Only the big thing itself: not something for it or a part of it ("bike light", "desk lamp", "grill cover",
+  // "cushion for sofa", "Herman Miller poster"), while "dresser with mirror" is still a dresser (2026-11-28 audit).
+  const BULKY_ALL = new RegExp(BULKY.source, "gi");
+  const FOR_IT = /\b(?:for|fits|fit|compatible)\b/i;
+  const BULKY_WITH = /\b(?:with|w|and|plus|includes?|including|comes)\b|[+&/,(]/i;
+  const PART_OF = new RegExp(String.raw`\b(?:lights?|lamps?|helmets?|covers?|cushions?|pads?|blades?|paddles?|hinges?|magnets?|sheets?|posters?|prints?|` +
+    String.raw`pumps?|bags?|computers?|locks?|racks?|mounts?|parts?|seats?|saddles?|pedals?|tires?|tubes?|chains?|bells?|baskets?|knobs?|handles?|` +
+    String.raw`casters?|wheels?|filters?|belts?|hoses?|remotes?|manuals?|keys?|toys?|miniatures?|dollhouse|decals?|stickers?|chargers?|batter(?:y|ies)|` +
+    String.raw`cables?|shoes?|gloves?|jerseys?|shorts|kits?|tools?|bottles?|bulbs?|brush(?:es)?|grates?|thermometers?|skewers?|replacement|` +
+    String.raw`accessor(?:y|ies)|figurines?|ornaments?|books?)\b`, "i");
+  const bulkyOne = (text) => {
+    for (const m of String(text).matchAll(BULKY_ALL)) {
+      const before = text.slice(0, m.index), after = text.slice(m.index + m[0].length);
+      if (FOR_IT.test(before) || /\b(?:replacement|toy|miniature|dollhouse|poster|print)\b/i.test(before)) continue;
+      // the word right after it names a part or a thing for it (titles list features further on: "bike, new tires")
+      if (PART_OF.test(after.split(BULKY_WITH)[0].trim().split(/\s+/)[0] || "")) continue;
+      return true;
+    }
+    return false;
+  };
+  R.bulky = (...texts) => texts.filter(Boolean).some(bulkyOne);
+  R.tooCheap = (f, market) => {
+    const c = cheapLevel(f, market);
+    return c && c.level !== "reason" ? c : null;
+  };
+  // Under the softer cutoff with a reason on the card (R.cheapReason), or from an established eBay seller, and nothing
+  // else against it: not a warning, but the price chip says why it's cheap. { pct, why, established? } or null
+  // (why is "" for an established seller's listing that doesn't say).
+  R.cheapForReason = (f, market) => {
+    const c = cheapLevel(f, market);
+    return c?.level === "reason" ? { pct: c.pct, why: c.why || "", ...(c.established && { established: true }) } : null;
+  };
+  // Price alone, under the firm cutoff: "far" (Likely scam), unless the title leaves out a search word or says why
+  // it's cheap ("low", Check first). Under the softer cutoff: "low", or "reason" when the card says why. A seller
+  // with a strong warning (R.riskySeller: a handful of ratings, a poor score, an account made this year) makes the
+  // softer band "far" too: in the eval every such listing was a scam and honest new sellers price near the typical
+  // price. `seller` on the result is that warning, in words. A reason doesn't clear that pair,
+  // but keeps it at "low".
+  // `why` (f.saysWhy from compareFacts, or worked out here) is set on "low" and "reason" for the chip to say.
+  const cheapLevel = (f, market) => {
+    if (!(market?.median > 0) || market.confidence === "rough" || f?.total == null || f.total <= 0) return null;
+    if (f.auction || f.lot || f.project || f.accessory || f.foreign || f.priceRange || f.related === false) return null;
+    const pct = f.total / market.median;
+    const risky = !f.offWords && (f.sellerRisk ?? R.riskySeller(f)); // sellerRisk: worked out by the caller (the eval, at a fixed date)
+    // A pickup seller keeps the whole price; an eBay seller pays about 13.6% in fees, so the same net asks less locally.
+    // Not beside a strong seller sign: a new account at half price is the scam's look on any site. Lower again for
+    // big things picked up locally (R.BULKY_LOCAL).
+    const cut = market.local && !risky ? (market.localNet > 0 ? market.localNet : R.LOCAL_NET) * (R.bulky(market.query, f.title) ? R.BULKY_LOCAL : 1) : 1;
+    if (pct >= R.TOO_CHEAP.low * cut) return null;
+    const why = f.saysWhy ?? R.cheapReason(f.title, f.text ?? f.details, `${market.query || ""} ${R.variantLike(market)}`.trim());
+    const out = (level, extra) => ({ level, pct: Math.round(pct * 100), ...(why && level !== "far" && { why }), ...extra });
+    // Real sales went this low (the cheapest tenth of them, market.p10): honest prices land here too, as in a search
+    // that mixes models ("nintendo switch": Lites, V1s and OLEDs), so it isn't bait on price alone.
+    if (market.p10 > 0 && f.total >= market.p10) return why ? out("reason") : null;
+    // Under the firm cutoff only something missing or a cheaper version explains it: "minor scratches" doesn't
+    // take 60% off, and it's the story bait tells.
+    // A "fair" reference (fewer sales, or a wider spread) can't say a price alone is bait: that needs a "good" one.
+    const big = why && !FLAW.test(why);
+    // An established eBay seller (100 ratings or more, 98% positive): eBay's money-back guarantee stands behind the
+    // listing, and fakes rarely come from such accounts at a soft discount. Under the softer cutoff that's no warning;
+    // under the firm one it is as for anyone (a fake from an established seller is still in the eval).
+    const established = !market.local && f.sellerCount >= 100 && f.sellerPct >= 98;
+    if (pct < R.TOO_CHEAP.far * cut) return risky ? out("far", { seller: risky }) : out(f.offWords || big || market.confidence !== "good" ? "low" : "far");
+    if (risky) return why ? out("low") : out("far", { seller: risky });
+    return why ? out("reason") : established ? out("reason", { established: true }) : out("low");
+  };
+
+  // Why a listing says it's cheap, in its own words: a flaw ("dead pixel", "battery 76%", "carrier locked"),
+  // something missing ("console only, no dock"), or a cheaper version than the search ("mini" in an iPhone 13
+  // search). Returns the words, or "". Said away ("no scratches", "scratch-free") doesn't count, and nor do the
+  // quick-sale words ("moving", "must go"): bait uses them as much as anyone. `query`: the search, so a version
+  // the search names ("switch lite") isn't a cheaper one.
+  const FLAW = new RegExp(String.raw`\b(` + [
+    String.raw`(?:dead|stuck|bad) pixels?`, String.raw`scratch(?:ed|es)?`, String.raw`scuff(?:ed|s)?`, String.raw`dent(?:ed|s)?`, String.raw`dings?`,
+    String.raw`(?:small |hairline )?cracks? (?:on|in) (?:the )?(?:back|bezel|case|corner|side|frame|housing|lens|glass)`,
+    String.raw`cracked (?:back|bezel|case|corner|frame|housing|lens|glass)`, String.raw`(?:small|hairline) crack`, String.raw`chipped`,
+    String.raw`(?:heavy|lots of|signs of) wear`, String.raw`(?:well |very )?worn`, String.raw`stain(?:ed|s)?`, String.raw`drift(?:ing)?`,
+    String.raw`battery (?:health |life |at )?(?:[1-7]\d|8[0-4]) ?%`, String.raw`(?:[1-7]\d|8[0-4]) ?% battery`, String.raw`(?:bad|weak|swollen) battery`,
+    String.raw`needs (?:a )?(?:new )?battery`, String.raw`squeak(?:s|y|ing)?`, String.raw`meter (?:dead|doesn'?t work|not working|is off)`,
+    String.raw`(?:needs |new )?light seals?`, String.raw`(?:carrier|network|sim) locked`, String.raw`(?:verizon|at ?t|at&t|t-mobile|sprint|cricket|metro) locked`,
+    String.raw`locked to (?:verizon|at ?t|at&t|t-mobile|sprint|cricket|metro|a carrier)`, String.raw`(?:screen |lcd )?burn[- ]?in`,
+    String.raw`screen (?:spots?|lines?|bruises?|discolou?ration)`, String.raw`lines? on (?:the )?screen`, String.raw`cosmetic (?:damage|issues?|wear|flaws?)`,
+    String.raw`(?:fair|poor|rough) (?:condition|shape)`, String.raw`as found`, String.raw`(?:has|with) (?:some )?(?:issues?|flaws?|problems?)`, String.raw`haze|fungus|separation`,
+  ].join("|") + String.raw`)(?!\w)`, "i");
+  const PARTS_GONE = String.raw`joy ?cons?|dock|charger|charging (?:cable|case)|controllers?|lens(?:es)?|battery|batteries|cables?|stand|power (?:cord|supply|adapter)|cord|adapter|remote|case|earbuds?|stylus|keyboard|accessories`;
+  const MISSING = new RegExp(String.raw`\b((?:missing|without|no) (?:the |its |a |any )?(?:${PARTS_GONE})|missing [\w-]+|(?:console|tablet|body|unit|handheld|screen|tool|phone|laptop|earbuds?|(?:left|right) (?:earbud|airpod|ear|side)) only)\b`, "i");
+  const CHEAPER = /\b(lite|mini|1st gen(?:eration)?|first gen(?:eration)?|gen ?1|v1|older model)\b/i;
+  const SAID_AWAY = /\b(?:no|not a|not one|zero|without|free of|never|any)\s+(?:\w+\s+)?$/i;
+  const cheapSeen = new Map(); // (title, text, search) -> the answer: a feed asks again for every card each time it loads more
+  R.cheapReason = (title, text = "", query = "") => {
+    const key = `${title || ""}\u0001${text || ""}\u0001${query || ""}`;
+    if (cheapSeen.has(key)) return cheapSeen.get(key);
+    if (cheapSeen.size > 5000) cheapSeen.clear();
+    const out = cheapReasonOf(title, text, query);
+    cheapSeen.set(key, out);
+    return out;
+  };
+  const cheapReasonOf = (title, text, query) => {
+    let t = R.fold(`${title || ""} ${text || ""}`).replace(/\s+/g, " ");
+    // Compared with locked phones' sales (R.forVariant): its carrier lock isn't why it's cheap.
+    if (R.hasWord(query, "locked")) t = t.replace(/\b(?:(?:carrier|network|sim|verizon|at ?t|at&t|t-mobile|sprint|cricket|metro) locked|locked to (?:verizon|at ?t|at&t|t-mobile|sprint|cricket|metro|a carrier))\b/gi, " ");
+    const said = (re) => {
+      for (const m of t.matchAll(new RegExp(re.source, "gi"))) {
+        if (SAID_AWAY.test(t.slice(Math.max(0, m.index - 24), m.index)) || /^[- ]?free\b/.test(t.slice(m.index + m[0].length))) continue;
+        return m[1].toLowerCase();
+      }
+      return "";
+    };
+    const flaw = said(FLAW);
+    if (flaw) return flaw;
+    const missing = t.match(MISSING)?.[1];
+    if (missing && !/^missing (?:nothing|anything|out)\b/.test(missing.toLowerCase()) && !/\bnot (?:be )?$/.test(t.slice(0, t.indexOf(missing.toLowerCase())))) return missing.toLowerCase();
+    const cheaper = t.match(CHEAPER)?.[1];
+    // Not when the typical price is already for that generation ("gen 1" from R.variantLike).
+    if (cheaper && !R.hasWord(query, cheaper) && !(R.genOf(cheaper) && R.genOf(cheaper) === R.genOf(query))) return cheaper.toLowerCase();
+    return R.smallerStorage(t, query) || R.lesserPart(title, query);
+  };
+  // A smaller size than the search names: "64GB" in an "iphone 13 128gb" search. "" when there's none.
+  R.smallerStorage = (title, query = "") => {
+    const size = (s) => [...R.fold(s).matchAll(/\b(\d+) ?(gb|tb)\b/g)].map((m) => +m[1] * (m[2] === "tb" ? 1024 : 1));
+    const want = size(query)[0];
+    const have = size(title).filter((n) => n >= 16); // not 8GB of memory beside 256GB of storage
+    return want && have.length && Math.max(...have) < want ? `${Math.max(...have) >= 1024 ? Math.max(...have) / 1024 + "TB" : Math.max(...have) + "GB"}` : "";
+  };
+
+  // A title code that is the model number you searched for ("DeWalt 20V Max Drill DCD771C2" in a "dewalt dcd771"
+  // search) isn't a scammer's code: the search has it, so every honest listing of that model ends with it.
+  // A search word counts when it has letters and digits and is 4 or more long, and the code starts with it
+  // or it starts with the code.
+  R.codeInSearch = (code, query = "") => {
+    const c = R.fold(code).replace(/[^a-z0-9]/g, "");
+    if (c.length < 4) return false;
+    return R.normTitle(query).split(" ").some((w) => w.length >= 4 && /\d/.test(w) && /[a-z]/.test(w) && (c.startsWith(w) || w.startsWith(c)));
+  };
+
+  // A card's facts against the search's typical price, the way the panel works them out on every results page
+  // (and tests/eval runs them on labeled listings). Sets f.accessory, f.offWords and f.cheap; returns the
+  // total as a share of the typical price, or null when the two shouldn't be compared (a lot, an auction, an
+  // accessory, a stand-in price). `query`: the search the typical price is for. A listing priced from its own
+  // title (f.ownMarket) isn't held against the search's words.
+  R.compareFacts = (f, market, query = "") => {
+    f.accessory = (!f.ownMarket && R.accessoryOf(f.title, query)) || "";
+    f.offWords = (!f.ownMarket && R.missingWord(f.title, query)) || "";
+    // A version the typical price is already for (R.forVariant: "lite" against Lite sales) isn't why it's cheap.
+    const like = R.variantLike(market);
+    f.saysWhy = R.cheapReason(f.title, f.text, `${f.ownMarket ? "" : query} ${like}`.trim()); // why it's cheap, in its own words (tooCheap)
+    const off = !f.ownMarket && R.offSearch(f.title, query);
+    // A free listing ($0, Marketplace's and Craigslist's "Free") has no share of the typical price: 0% read as a "Great price"
+    // and a great find on a saved search, for a free PS5 as much as a curbside couch.
+    const vs = market?.median > 0 && f.total > 0 && !f.foreign && !f.priceRange && !f.lot && !f.auction && !f.accessory && !off && !R.tooFarToCompare(f.price ?? f.total, market.median) ? f.total / market.median : null;
+    f.cheap = (vs != null && (R.tooCheap(f, market)?.level || (R.cheapForReason(f, market) && "reason"))) || ""; // backs up a title code (codeBacked)
+    return vs;
+  };
+
+  // A search that names no version gets every version in its sales: "nintendo switch" has Lites at $95 beside OLEDs at
+  // $250, "iphone 13" has 128GB phones beside 512GB Pro Maxes, "airpods pro" has both generations, "dyson" V8s beside
+  // V11s. A listing is compared with sales of its own kind, read on three axes:
+  //  - tier: a version word ("lite", "oled", "pro max", "tool only"); none means the plain one.
+  //  - generation: "2nd gen", "gen 2", "AirPods Pro 2" (all "gen 2"), or a revision, "v2" ("v 2"); none means it
+  //    doesn't say, so any generation. An Apple chip ("m1", "m2 pro") or a model year ("2017") counts as one too, and
+  //    so does a graphics card's or processor's exact model ("rtx 3060 ti", "ryzen 5600x", R.partOf).
+  //  - storage: the largest size of 16GB or more ("256gb"), or a graphics card's memory ("12gb"); none means it
+  //    doesn't say, so any size.
+  // Tier words, longer phrases first, so "Pro Max" isn't read as "Pro" or "Max".
+  R.TIER_MODIFIERS = ["pro max", "digital edition", "disc edition", "body only", "tool only", "bare tool", "console only", "tablet only",
+    "lite", "oled", "mini", "plus", "pro", "ultra", "max", "slim", "se", "fe"];
+  // Only what comes before "with", "+" or "bundle" names the thing: "Switch with Pro Controller" is a Switch, and
+  // "iPhone 13 with 64GB card" isn't a 64GB phone.
+  // "Galaxy S21+" is a Plus, not an S21 with something added.
+  // Nor is "8GB+128GB" a phone with something added, or "AT&T" two things.
+  // "GPS + Cellular" and "Wi-Fi + LTE" say one thing, not a watch with something added; "Watch5", "Series7" and
+  // "Active2" are "Watch 5", "Series 7", "Active 2"; an "Apple Watch S9" is a Series 9.
+  const prepModel = (s) => String(s ?? "")
+    .replace(/\b(?:gps|wi[\s-]?fi)\s*(?:\+|&|\/|and)\s*(?:cellular|lte|[345]g)\b/gi, "cellular")
+    .replace(/\b(watch|series|active|paperwhite|oasis)(\d{1,2})\b/gi, "$1 $2")
+    .replace(/\bwatch\s+s(\d{1,2})\b/gi, "watch series $1");
+  const head = (title) => R.normTitle(prepModel(title).replace(/(\d\s?[gt]b)\s*\+\s*(?=\d)/gi, "$1 ").replace(/\bat\s?&\s?t\b/gi, "att").replace(/([a-z0-9])\+(?=\s|$)/gi, "$1 plus").split(/\s(?:with|w\/|includes?|including|plus\s+\d+(?=\s)|bundle)\s|\s*[+&]\s*/i)[0]);
+  // A tier word that names something else: "Pro Seller", "Pro Controller Bundle", "(Max Battery 100%)", "Plus
+  // Carrying Case". "Plus" is a version only after a model number ("8 Plus", "S10 Plus", "Note 20 Plus").
+  const NOT_TIER = /^(?:controllers?|sellers?|battery|batteries|cases?|covers?|chargers?|charging|grips?|docks?|adapters?|cables?|stands?|skins?|protectors?|carrying|bags?|pouch|tips|shipping|membership|subscription|games?|bundle)$/;
+  const tierAt = (words, m) => {
+    const n = m.split(" ").length;
+    for (let i = 0; i + n <= words.length; i++) {
+      if (words.slice(i, i + n).join(" ") !== m) continue;
+      if (NOT_TIER.test(words[i + n] || "")) continue;
+      if (m === "plus" && !/\d/.test(words[i - 1] || "")) continue;
+      return true;
+    }
+    return false;
+  };
+  // The tier word a title names that `query` doesn't ("lite" in a "nintendo switch" search), or "".
+  R.variantOf = (title, query = "") => {
+    const words = head(title).split(" ");
+    return R.TIER_MODIFIERS.find((m) => tierAt(words, m) && !R.hasWord(query, m)) || "";
+  };
+  // "gen 2" for "2nd gen", "2nd generation", "gen 2" or "generation 2", and "v 2" for "v2": a revision ("Switch V2", the
+  // longer battery) isn't the second model ("Switch 2"), and "Dyson V8" is a model name. "" when the text names none, or names
+  // several ("iPod Classic 5th 6th 7th Generation": one listing for any of them). Not "20v" (a voltage), "v220", or
+  // "Generation (30 GB)".
+  const GEN = /(?:^|\s)(?:(\d{1,2})(?:st|nd|rd|th)\s?gen(?:eration)?|gen(?:eration)?\s?(\d{1,2})(?!\s?(?:gb|tb|mb)(?:\s|$))|v(\d{1,2}))(?=\s|$)/;
+  R.genOf = (text) => {
+    const t = R.normTitle(text);
+    const m = t.match(GEN);
+    if (!m) return "";
+    if (m[1] && new Set([...t.matchAll(/(?:^|\s)(\d{1,2})(?:st|nd|rd|th)(?=\s|$)/g)].map((x) => +x[1])).size > 1) return "";
+    return m[3] ? `v ${+m[3]}` : `gen ${+(m[1] || m[2])}`;
+  };
+  // The storage size a title names ("256gb", "1tb"), of 16GB or more, or "". Two sizes far apart are memory and
+  // storage ("16GB 512GB": 512GB); sizes close together are a choice of several ("30GB 60GB 80GB"), so none.
+  R.sizeOf = (text) => {
+    const sizes = [...new Set([...R.normTitle(text).matchAll(/(?:^|\s)(\d+)\s?(gb|tb)(?=\s|$)/g)].map((m) => +m[1] * (m[2] === "tb" ? 1024 : 1)).filter((n) => n >= 16))].sort((a, b) => b - a);
+    if (!sizes.length || (sizes.length > 1 && sizes[0] < sizes[1] * 4) || sizes.length > 2) return "";
+    const n = sizes[0];
+    return n >= 1024 && n % 1024 === 0 ? `${n / 1024}tb` : `${n}gb`;
+  };
+  // An Apple chip ("M1", "M2 Pro", "M3 Max"): a MacBook Air M1 and an M3 are as far apart as two generations. Only in a
+  // title that names a Mac or an iPad, so an "M2 NVMe SSD", "M4 screws" or a "BMW M3" part isn't read as one. "" for
+  // none, or several ("M1 M2 compatible").
+  const CHIP = /(?:^|\s)(m[1-9])(?:\s(pro|max|ultra))?(?=\s|$)/g;
+  const APPLE = /(?:^|\s)(?:apple|mac|macbook|imac|ipad)(?:\s|$)/;
+  R.chipOf = (text) => {
+    const t = R.normTitle(text);
+    if (!APPLE.test(t)) return "";
+    const chips = new Set([...t.matchAll(CHIP)].map((m) => (m[2] ? `${m[1]} ${m[2]}` : m[1])));
+    return chips.size === 1 ? [...chips][0] : "";
+  };
+  // A model year ("MacBook Air 2017", "2018 Topps", "iPad Pro 2021"), 1990 to 2039: a 2017 Intel MacBook Air sells for
+  // a fifth of an M3's price. Not a count or a size ("2000 mAh", "1500 watt"), and "" when the text names several
+  // ("2015-2017", "fits 2012 2013 2014").
+  const YEAR = /(?:^|\s)(199\d|20[0-3]\d)(?=\s|$)/g;
+  const NOT_YEAR = /^(?:w|watts?|mah|mhz|ghz|lbs?|pcs|pieces?|rpm|dpi|lumens?|mm|cc|psi|btu|ct|count|sq|ft|x|k|ml|g|kg|oz|calories|piece|points?|yards?|meters?|miles?|mi|km|hrs?|hours?)$/;
+  R.yearOf = (text) => {
+    const t = R.normTitle(text);
+    const years = new Set();
+    for (const m of t.matchAll(YEAR)) {
+      const next = t.slice(m.index + m[0].length).trim().split(" ")[0];
+      if (!NOT_YEAR.test(next)) years.add(m[1]);
+    }
+    return years.size === 1 ? [...years][0] : "";
+  };
+  // A graphics card's or a processor's exact model: "rtx 3060 ti", "rx 6700 xt", "arc a770", "ryzen 5600x",
+  // "i7 12700k", "ultra 7 265k". A 3060 Ti sells for half again a plain 3060, a 5800X3D for twice a 5800X, so the
+  // whole model is the generation, suffix and all. A card comes before a processor ("Gaming PC Ryzen 5 5600X RTX
+  // 3060" is priced by its card). "" for none, or for several ("fits GTX 1070 1080", "RTX 3060 / 3070").
+  // Not a Sony RX100 (RX numbers are 400 to 599 or 5000 up), a "Mustang GT 500" (GT only beside GeForce or NVIDIA),
+  // a "BMW i3 2015" (an i3 to i9 with four digits needs Intel, Core, a CPU word or a letter after it) or a Canon R5.
+  const PART_JOIN = /(\d)(ti|super|xtx|xt|gre|x3d)(?=\s|$)/g; // "3060ti", "6700xt": the suffix as a word
+  const GPU = /(?:^|\s)(rtx|gtx|gt|rx)\s?(\d{3,4})((?:\s(?:ti super|ti|super|xtx|xt|gre))?)(?=\s|$)/g;
+  const ARC = /(?:^|\s)arc\s([ab]\d{3})(?=\s|$)/g;
+  const RYZEN = /(?:^|\s)ryzen\s(?:(?:threadripper|[3579])\s)?(?:pro\s)?(\d{4})\s?(x3d|xt|x|ge|g|f|hs|hx|h|u)?(?=\s|$)/g;
+  const CORE_I = /(?:^|\s)i([3579])\s?(\d{4,5})([a-z]{0,2}\d?)(?=\s|$)/g;
+  const CORE_ULTRA = /(?:^|\s)ultra\s([579])\s(\d{3})([a-z]{0,2})(?=\s|$)/g;
+  const partCache = new Map();
+  R.partOf = (text) => {
+    const raw = String(text ?? "");
+    if (partCache.has(raw)) return partCache.get(raw);
+    if (partCache.size > 5000) partCache.clear();
+    const t = R.normTitle(raw).replace(PART_JOIN, "$1 $2");
+    const nvidia = /(?:^|\s)(?:geforce|nvidia)(?:\s|$)/.test(t);
+    const gpus = new Set();
+    for (const m of t.matchAll(GPU)) {
+      const n = +m[2];
+      if (m[1] === "gt" && !nvidia) continue;
+      if (m[1] === "rx" && !((n >= 400 && n < 600) || n >= 5000)) continue;
+      if (m[1] !== "rx" && n < 600) continue;
+      gpus.add(`${m[1]} ${m[2]}${m[3]}`);
+      // "RTX 3060 3070 3080": a list of models it fits, not one
+      if (/^\s?\d{3,4}(?:\s|$)/.test(t.slice(m.index + m[0].length))) gpus.add("several");
+    }
+    for (const m of t.matchAll(ARC)) gpus.add(`arc ${m[1]}`);
+    let out = gpus.size === 1 ? [...gpus][0] : "";
+    if (!gpus.size) {
+      const cpus = new Set();
+      for (const m of t.matchAll(RYZEN)) cpus.add(`ryzen ${m[1]}${m[2] || ""}`);
+      const intel = /(?:^|\s)(?:intel|core|cpu|processor)(?:\s|$)/.test(t);
+      for (const m of t.matchAll(CORE_I)) if (intel || m[3] || m[2].length === 5) cpus.add(`i${m[1]} ${m[2]}${m[3]}`);
+      if (intel) for (const m of t.matchAll(CORE_ULTRA)) cpus.add(`ultra ${m[1]} ${m[2]}${m[3]}`);
+      out = cpus.size === 1 ? [...cpus][0] : "";
+    }
+    partCache.set(raw, out);
+    return out;
+  };
+  // A whole computer with a card in it ("Gaming PC RTX 3060 16GB 1TB"): its sizes are memory and storage, not the card's.
+  const PC_BUILD = /(?:^|\s)(?:pc|laptop|desktop|computer|notebook|tower|ram|ddr[345]|ssd|hdd|ryzen|intel|core)(?:\s|$)/;
+  const isGpu = (part) => /^(?:rtx|gtx|gt|rx|arc) /.test(part);
+  // A card's memory ("rtx 3060 12gb" against "8gb"), 2GB to 48GB: R.sizeOf counts 16GB and up, as storage. "" when the
+  // title names none, or several ("4GB 8GB").
+  R.vramOf = (text) => {
+    const sizes = new Set([...R.normTitle(text).matchAll(/(?:^|\s)(\d{1,2})\s?gb(?=\s|$)/g)].map((m) => +m[1]).filter((n) => n >= 2 && n <= 48));
+    return sizes.size === 1 ? `${[...sizes][0]}gb` : "";
+  };
+  // A lesser card or processor than the search names, for R.cheapReason: a plain "rtx 3060" in an "rtx 3060 ti"
+  // search, a "ryzen 5600" in a "ryzen 5600x" one, an 8GB card in a "12gb" one. "" when it isn't one.
+  R.lesserPart = (title, query = "") => {
+    const want = R.partOf(query);
+    const have = R.partOf(title);
+    if (!want || !have) return "";
+    const num = (p) => p.match(/\d{3,5}/)?.[0];
+    if (have !== want && num(have) === num(want) && want.startsWith(have)) return have;
+    if (have === want && isGpu(have)) {
+      const w = parseInt(R.vramOf(query)), h = parseInt(R.vramOf(title));
+      if (w && h && h < w) return `${h}gb`;
+    }
+    return "";
+  };
+  // A phone's model, read only in a title that names the line (iPhone, Pixel or Galaxy), so an "A54" part or an
+  // "S21" anything else isn't one: "iPhone 13" and "Pixel 7" ("gen 13", "gen 7", as a search ending in the number has
+  // them), "iPhone XR", "iPhone 6s", "Pixel 7a" (the cheaper one, not a Pixel 7), "Galaxy S21", "S10e", "A54",
+  // "Note 20", "Z Fold 5", "Z Flip 4". An "iPhone 13" search mixes in 14s, and a "samsung galaxy" one has S9s beside S24s.
+  // "" for none, or several ("Galaxy S21 S22 case", "iPhone 12 13 14").
+  const PHONE_MODELS = [
+    [/(?:^|\s)iphone\s?(\d{1,2})([sc]?)(?=\s|$)/g, (m) => (m[2] ? `${+m[1]}${m[2]}` : `gen ${+m[1]}`)],
+    [/(?:^|\s)iphone\s?(x|xr|xs)(?=\s|$)/g, (m) => m[1]],
+    [/(?:^|\s)pixel\s?(\d{1,2})(a?)(?=\s|$)/g, (m) => (m[2] ? `${+m[1]}a` : `gen ${+m[1]}`)],
+  ];
+  const GALAXY = /(?:^|\s)galaxy(?:\s|$)/; // not "samsung" alone: a "Samsung 980 Pro M2" is an SSD
+  const GALAXY_MODEL = /(?:^|\s)(?:([sa])(\d{1,2})(e?)|note\s?(\d{1,2})|z?\s?(fold|flip)\s?(\d))(?=\s|$)/g;
+  R.phoneModelOf = (text) => {
+    const t = R.normTitle(text);
+    const seen = new Set();
+    for (const [re, label] of PHONE_MODELS) {
+      for (const m of t.matchAll(re)) {
+        seen.add(label(m));
+        // "iPhone 12 13 14", "iPhone 12/12 Pro": a list of models (a case that fits them all), not one phone.
+        const next = t.slice(m.index + m[0].length).trim().split(" ")[0];
+        if (/^(?:\d{1,2}|x|xr|xs)$/.test(next) && !(+next > 20) && next !== m[1]) seen.add(`and ${next}`);
+      }
+    }
+    if (GALAXY.test(t)) {
+      for (const m of t.matchAll(GALAXY_MODEL)) seen.add(m[1] ? `${m[1]}${+m[2]}${m[3]}` : m[4] ? `note ${+m[4]}` : `${m[5]} ${m[6]}`);
+    }
+    return seen.size === 1 ? [...seen][0] : "";
+  };
+  // Carrier locked or not: a locked phone sells for less than an unlocked one, so locked sales are kept apart
+  // ("locked"), and a phone that says "Unlocked" or nothing is compared with the rest. A carrier's name without
+  // "unlocked" ("iPhone 13 128GB Verizon", "Cricket") counts as locked; "Verizon Unlocked" doesn't. Only in a title that
+  // names a phone, so an "unlocked" i7 isn't read as one. An iCloud, activation or FRP lock is a different thing (a
+  // phone for parts), not a carrier's. "" when it says nothing, or both ("locked or unlocked").
+  const PHONE = /(?:^|\s)(?:iphone|galaxy|pixel|samsung|motorola|moto|oneplus|phone|smartphone|cellphone)(?:\s|$)/;
+  const NOT_CARRIER_LOCK = /(?:^|\s)(?:icloud|activation|frp|google|account|bootloader|fmi|screen|sim tray)\s?(?:lock|locked)(?=\s|$)/g;
+  const UNLOCKED = /(?:^|\s)(?:unlocked|sim free|simfree)(?=\s|$)/;
+  const LOCKED = /(?:^|\s)locked(?=\s|$)/;
+  const CARRIER = /(?:^|\s)(?:att|at t|t mobile|tmobile|verizon|sprint|cricket|boost mobile|metro ?pcs|metro by t mobile|tracfone|straight talk|total wireless|xfinity|us cellular|spectrum mobile|consumer cellular|mint mobile)(?=\s|$)/;
+  R.lockOf = (text) => {
+    const t = R.normTitle(String(text ?? "").replace(/\bat\s?&\s?t\b/gi, "att")).replace(NOT_CARRIER_LOCK, " ");
+    if (!PHONE.test(t)) return "";
+    const unlocked = UNLOCKED.test(t);
+    if (LOCKED.test(t)) return unlocked ? "" : "locked";
+    return !unlocked && CARRIER.test(t) ? "locked" : "";
+  };
+  // A title's generation, most exact first, as genIn reads it. R.versionOf reads a card's or processor's model before
+  // all of these ("i7-12700K 12th Gen"); it's left out here, so a search's own model ("rtx 3060") isn't the thing
+  // itself and a plain 3060 gets sales of its own, apart from the 3060 Tis.
+  R.generationOf = (text) => genIn(head(text), [], undefined, true);
+  // A bare number right after the thing's name is its generation too: "Nintendo Switch 2" in a "nintendo switch"
+  // search, "Meta Quest 3", "AirPods Pro 2", "iPad mini 6", "Apple Watch Series 7". The name is the search's last word
+  // (kept in `same` as "@switch"), a tier word or "series". Up to 20, and not "Switch 2 Games", "Quest 2 128 GB" or a
+  // screen size before the chip ("MacBook Pro 14 M1 Pro").
+  const NOT_MODEL = /^(?:gb|tb|mb|games?|controllers?|joy|pack|pcs|pieces?|pairs?|lots?|ft|feet|in|inch|inches|x|units?|sets?|players?|batteries|months?|years?|hours?|day|days|m\d|i\d|intel|core|ryzen|retina)$/;
+  // A Surface's number comes before its processor ("Surface Pro 7 i5", "Surface Pro 4 m3"), so those don't stop it.
+  const NOT_MODEL_SURFACE = /^(?:gb|tb|mb|games?|pack|pcs|pieces?|lots?|in|inch|inches|x|units?|sets?)$/;
+  const modelNumberOf = (h, same, kind = deviceOf(h)) => {
+    const names = new Set([...same.filter((x) => x.startsWith("@")).map((x) => x.slice(1)), ...R.TIER_MODIFIERS.filter((m) => m !== "plus" && !m.includes(" ")), "series", ...(DEVICE_NAMES[kind] || [])]);
+    if (!same.some((x) => x.startsWith("@"))) return ""; // a typical price saved before this read numbers: as it was
+    // A Mac's number is its screen ("MacBook Air 13 2017", "MacBook Pro 16 A2141"), and so is an iPad Pro's 11 or 12.9:
+    // its chip or year says the generation. A Fire tablet's number is its screen too ("Fire HD 10"), its tier.
+    if (/(?:^|\s)(?:macbook|imac)(?:\s|$)/.test(h) || kind === "fire") return "";
+    const notModel = kind === "surface" ? NOT_MODEL_SURFACE : NOT_MODEL;
+    const w = h.split(" ");
+    for (let i = 0; i + 1 < w.length; i++) {
+      if (!names.has(w[i]) || !/^\d{1,2}$/.test(w[i + 1]) || +w[i + 1] > 20 || notModel.test(w[i + 2] || "")) continue;
+      if (w[i] === "pro" && w[i - 1] === "ipad" && /^1[12]$/.test(w[i + 1])) continue;
+      return `gen ${+w[i + 1]}`;
+    }
+    return "";
+  };
+  // Consoles and handhelds, whose versions a title says in words and model codes the general reading misses:
+  // "PS5 Slim Digital" (two tier words), "Xbox Series S" against "Series X", "New 3DS XL", "Game Boy Advance SP
+  // AGS-101", "Switch HEG-001" (an OLED). Returns { tier, gen } for a title that names one ("" is the plain one or
+  // any generation), or null to read it the usual way. A family that spans console generations ("xbox": a 360, a
+  // One, a Series) has its line as the generation; the word that sets one apart within it is the tier.
+  const CONSOLE_ALIAS = [
+    [/(?<=^|\s)(?:ps|playstation)\s?([1-5])(?=\s|$)/g, "playstation $1"],
+    [/(?<=^|\s)game boy(?=\s|$)/g, "gameboy"],
+    [/(?<=^|\s)gba(?=\s|$)/g, "gameboy advance"],
+    [/(?<=^|\s)gbc(?=\s|$)/g, "gameboy color"],
+    [/(?<=^|\s)(?:xsx)(?=\s|$)/g, "xbox series x"],
+    [/(?<=^|\s)(?:xss)(?=\s|$)/g, "xbox series s"],
+    [/(?<=^|\s)(3ds|2ds|dsi)\s(?:ll)(?=\s|$)/g, "$1 xl"],
+  ];
+  const consoleWords = (h) => CONSOLE_ALIAS.reduce((t, [re, to]) => t.replace(re, to), String(h ?? ""));
+  const has = (t, re) => re.test(t);
+  // "Brand New 3DS" is its condition; "New Nintendo 3DS" or "New 3DS XL" is the model.
+  const NEW_DS = /(?:^|\s)(?<!(?:brand|like|almost|never|sealed|condition|open|box)\s)new (?:nintendo )?(?:3ds|2ds)(?=\s|$)/;
+  R.consoleOf = (title) => {
+    const t = consoleWords(R.normTitle(title));
+    const words = t.split(" ");
+    const one = (re) => new Set([...t.matchAll(re)].map((m) => m[1]));
+    // PlayStation: the number is the generation (or a model code's: CFI is a PS5, CUH a PS4); Pro, Slim and Digital
+    // are tiers, a Slim Digital a tier of its own, and a disc one ("Disc Edition", "Standard") the plain one.
+    // CFI-1xxx is the first PS5, 2xxx the Slim, 7xxx the Pro, with A for disc and B for digital.
+    const ps = one(/(?:^|\s)playstation ([1-5])(?=\s|$)/g);
+    const cfi = t.match(/(?:^|\s)cfi\s?([127])\d{3}([ab])?(?=\s|$)/);
+    const cuh = t.match(/(?:^|\s)cuh\s?([127])\d{3}[ab]?(?=\s|$)/);
+    if (ps.size > 1) return null;
+    if (ps.size || cfi || cuh) {
+      const n = [...ps][0] || (cfi ? "5" : "4");
+      const code = cfi || cuh;
+      const pro = tierAt(words, "pro") || code?.[1] === "7";
+      const slim = /(?:^|\s)slim(?=\s|$)/.test(t) || code?.[1] === "2";
+      const digital = /(?:^|\s)digital(?=\s|$)/.test(t) || cfi?.[2] === "b";
+      return { tier: pro ? "pro" : slim && digital ? "slim digital" : slim ? "slim" : digital ? "digital edition" : "", gen: `gen ${n}` };
+    }
+    // Xbox: the line (360, One, Series) is the generation, then S, X or E within it; an all-digital one is its own.
+    if (has(t, /(?:^|\s)xbox(?=\s|$)/)) {
+      // "Xbox One" only as that ("Series X, one controller" is a Series X).
+      const lines = new Set([...one(/(?:^|\s)xbox (360|one|series)(?=\s|$)/g), ...one(/(?:^|\s)(360|series) [sxe](?=\s|$)/g)]);
+      if (lines.size > 1) return null;
+      const line = [...lines][0];
+      if (!line) return null;
+      const sub = one(new RegExp(`(?:^|\\s)${line} ([sxe])(?=\\s|$)`, "g"));
+      const digital = /(?:^|\s)(?:all )?digital(?=\s|$)/.test(t);
+      // "Series X|S" names both: any.
+      const letter = sub.size === 1 && !has(t, new RegExp(`(?:^|\\s)${line} [sx] [sx](?=\\s|$)`)) ? [...sub][0] : "";
+      const tier = letter ? `${line} ${letter}${digital ? " digital" : ""}` : line === "360" && /(?:^|\s)slim(?=\s|$)/.test(t) ? "360 s" : "";
+      return { tier, gen: `xbox ${line}` };
+    }
+    // Nintendo's DS line: DS, DSi, 3DS and 2DS are generations; XL ("LL" in Japan), Lite and New are tiers.
+    const ds = one(/(?:^|\s)(ds|dsi|3ds|2ds)(?=\s|$)/g);
+    if (ds.size === 1 && (has(t, /(?:^|\s)nintendo(?=\s|$)/) || !ds.has("ds") || has(t, /(?:^|\s)ds (?:lite|xl)(?=\s|$)/))) {
+      const isNew = NEW_DS.test(t);
+      const xl = /(?:^|\s)(?:3ds|2ds|dsi) xl(?=\s|$)/.test(t);
+      // There's no 2DS XL that isn't a New one.
+      const isNew2 = isNew || /(?:^|\s)2ds xl(?=\s|$)/.test(t);
+      const lite = /(?:^|\s)ds lite(?=\s|$)/.test(t);
+      return { tier: [isNew2 && "new", xl && "xl", lite && "lite"].filter(Boolean).join(" "), gen: [...ds][0] };
+    }
+    // Game Boy: Advance, Color and Pocket are generations (or their codes: AGB, CGB, MGB, and DMG for the first);
+    // SP and Micro are tiers, and a backlit SP (AGS-101) sells for more than a frontlit one.
+    if (has(t, /(?:^|\s)gameboy(?=\s|$)|(?:^|\s)(?:agb|ags|cgb|mgb|dmg|oxy)\s?\d{2,3}(?=\s|$)/)) {
+      const code = t.match(/(?:^|\s)(agb|ags|cgb|mgb|dmg|oxy)\s?(\d{2,3})(?=\s|$)/);
+      const fam = code ? { agb: "advance", ags: "advance", oxy: "advance", cgb: "color", mgb: "pocket", dmg: "" }[code[1]] : null;
+      const named = one(/(?:^|\s)gameboy (advance|color|colour|pocket|light)(?=\s|$)/g);
+      if (named.size > 1) return null;
+      const line = (fam ?? [...named][0]?.replace("colour", "color")) || (has(t, /(?:^|\s)(?:sp|micro)(?=\s|$)/) ? "advance" : "");
+      const sp = has(t, /(?:^|\s)sp(?=\s|$)/) || code?.[1] === "ags";
+      const micro = has(t, /(?:^|\s)micro(?=\s|$)/) || code?.[1] === "oxy";
+      const backlit = sp && (code?.[1] === "ags" && code[2] === "101" || has(t, /(?:^|\s)(?:backlit|brighter)(?=\s|$)/));
+      return { tier: micro ? "micro" : backlit ? "sp ags-101" : sp ? "sp" : "", gen: line ? `gameboy ${line}` : "" };
+    }
+    // Switch: model codes. HEG-001 is the OLED, HDH-001 the Lite, HAC-001(-01) the longer-battery V2, BEE-001 the
+    // Switch 2; and a Switch 2 is the second generation in any search ("nintendo", not only "nintendo switch").
+    if (has(t, /(?:^|\s)switch(?=\s|$)/) || has(t, /(?:^|\s)(?:hac|heg|hdh|bee)\s?001(?=\s|$)/)) {
+      const tier = has(t, /(?:^|\s)heg\s?001(?=\s|$)/) ? "oled" : has(t, /(?:^|\s)hdh\s?001(?=\s|$)/) ? "lite" : null;
+      const two = t.match(/(?:^|\s)switch 2(?:\s(\S+))?(?=\s|$)/);
+      const gen = has(t, /(?:^|\s)bee\s?001(?=\s|$)/) || (two && !NOT_MODEL.test(two[1] || "")) ? "gen 2"
+        : has(t, /(?:^|\s)hac\s?001\s?01(?=\s|$)/) ? "v 2" : null;
+      return tier == null && gen == null ? null : { tier, gen };
+    }
+    // Meta Quest 3S is a cheaper headset than the Quest 3; ROG Ally X and Legion Go S are their own models too.
+    const qs = t.match(/(?:^|\s)quest (\d)s(?=\s|$)/);
+    if (qs) return { tier: null, gen: `${qs[1]}s` };
+    if (has(t, /(?:^|\s)ally x(?=\s|$)/)) return { tier: "ally x", gen: null };
+    if (has(t, /(?:^|\s)legion go s(?=\s|$)/)) return { tier: "go s", gen: null };
+    return null;
+  };
+  // What a search adds to `same` for modelNumberOf: its name word ("@switch"), and the number it ends in as a
+  // generation that's the thing itself ("iphone 13": "gen 13", "@iphone"). Words to leave out ("-case") don't count.
+  const searchName = (query) => {
+    const w = consoleWords(R.normTitle(String(query ?? "").replace(/(?:^|\s)-\S+/g, " "))).split(" ").filter(Boolean);
+    if (!w.length) return [];
+    const last = w[w.length - 1];
+    if (/^\d{1,2}$/.test(last)) {
+      if (w.length < 2) return [];
+      const h = w.join(" "), kind = deviceOf(h);
+      // "fire hd 10" ends in a screen, not a generation; "kindle paperwhite 3" is the 7th generation.
+      return kind === "fire" ? [`@${w[w.length - 2]}`] : [mapGen(h, kind, `gen ${+last}`, true), `@${w[w.length - 2]}`];
+    }
+    return [`@${last}`];
+  };
+  // Cameras and lenses (2026-11-02). A "sony a7" search has the a7 II at $500 beside the a7 IV at $1,700, and a body
+  // beside a kit with a lens; a "canon 50mm" search has the f/1.8 at $100 beside the f/1.2L at $1,200. A search for a
+  // camera (a camera maker and a model, or "camera") or a lens (a focal length, or "lens") is marked in `same` ("#camera",
+  // "#lens"; a typical price saved before reads as it did), and its titles are read the camera way:
+  //  - a camera: "Mark III", "Mk2" or "III" after the model ("a7 III", "Z6 II", "A7III", "X100V") is the generation; a
+  //    letter after the search's model ("a7R", "a7S" in a "sony a7" search) is a model of its own (a tier, "a7r"); a
+  //    lens with it ("with 28-70mm", "lens kit") is a "kit", apart from a body.
+  //  - a lens: its focal length ("24-70mm") and widest aperture ("f2.8") are its tier, "II", "Mark II" or Tamron's
+  //    "G2" its generation ("GM II"), and a Canon or Nikon mount named before the focal length ("RF 50mm") takes the
+  //    storage's place ("rf mount"; none means it doesn't say, so any mount).
+  const CAMERA_MAKER = /(?:^|\s)(?:sony|canon|nikon|nikkor|fujifilm|fuji|panasonic|lumix|olympus|om system|leica|pentax|ricoh|hasselblad|sigma|tamron|tokina|samyang|rokinon|viltrox)(?:\s|$)/;
+  const CAMERA_WORD = /(?:^|\s)(?:cameras?|dslr|mirrorless|camcorder)(?:\s|$)/;
+  // What a camera maker makes besides cameras: a "sony ps5" or "canon pixma" search stays as it was.
+  const NOT_CAMERA = /(?:^|\s)(?:ps\d|playstation|bravia|tvs?|television|headphones?|earbuds|pixma|printers?|ink|toner|walkman|soundbar|speakers?|xperia|calculator)(?:\s|$)/;
+  // A camera model: a few letters and a number ("a7", "5d", "z6", "x100", "gh5", "rx100", "r6", "a7r"), not a size.
+  const CAM_MODEL = /^(?=[a-z]*\d)[a-z]{0,3}\d{1,4}[a-z]{0,2}$/;
+  const NOT_CAM_MODEL = /(?:gb|tb|mb|mp|mm|k|fps|x)$/;
+  const isCamModel = (w) => CAM_MODEL.test(w) && /[a-z]/.test(w) && !NOT_CAM_MODEL.test(w);
+  const ROMAN = { ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8 };
+  // "A7III", "A7RIV", "Z6II", "X100VI" as "a7 iii", "a7r iv", "z6 ii", "x100 vi"; "5DMKIII", "Mk2", "RX100M7" as "mark".
+  const camSplit = (t) => t
+    .replace(/mk\s?(?=(?:viii|vii|vi|iv|v|iii|ii|\d)(?:\s|$))/g, " mark ")
+    .replace(/(\d)m(\d)(?=\s|$)/g, "$1 mark $2")
+    .replace(/(^|\s)([a-z]{0,3}\d{1,4})([a-z]??)(viii|vii|vi|iv|v|iii|ii)(?=\s|$)/g, "$1$2$3 $4")
+    .replace(/\s+/g, " ").trim();
+  // The generation a camera's or a lens's title names: "gen 3" for "Mark III", "Mark 3", or "III" right after a model
+  // ("a7 III") or, on a lens, anywhere ("GM II", "VR II"; not Tamron's "Di III", a mount line), and "G2". "" for none,
+  // or several.
+  const camGenOf = (t, lens = false) => {
+    const w = t.split(" ");
+    const gens = new Set();
+    for (let i = 0; i < w.length; i++) {
+      if (w[i] === "mark" && (ROMAN[w[i + 1]] || /^\d$/.test(w[i + 1] || ""))) gens.add(ROMAN[w[i + 1]] || +w[i + 1]);
+      else if (ROMAN[w[i]] && w[i - 1] !== "mark" && (lens ? ROMAN[w[i]] <= 4 && w[i - 1] !== "di" : i > 0 && (isCamModel(w[i - 1]) || /^\d{1,4}$/.test(w[i - 1])))) gens.add(ROMAN[w[i]]);
+      else if (lens && /^g[2-4]$/.test(w[i])) gens.add(+w[i][1]);
+    }
+    return gens.size === 1 ? `gen ${[...gens][0]}` : "";
+  };
+  // A focal length: "24-70mm", "50mm", "28-70 f/3.5" ("mm" left out before an aperture). `loose`, for a search: any
+  // range ("sony 24-70").
+  const FOCAL = /(?:^|[^\d.])(\d{1,3}(?:\.\d)?)(?:\s?-\s?(\d{2,4}))?\s?mm(?![a-z])/;
+  const FOCAL_RANGE = /(?:^|[^\d.a-z])(\d{1,3})\s?-\s?(\d{2,4})(?=\s*(?:f\s?\/?\s?\d|1:\d|lens|$))/;
+  const FOCAL_LOOSE = /(?:^|[^\d.a-z])(\d{1,3})\s?-\s?(\d{2,4})(?![\d.])/;
+  const focalOf = (raw, loose = false) => {
+    const m = raw.match(FOCAL) || raw.match(loose ? FOCAL_LOOSE : FOCAL_RANGE);
+    if (!m || (m[2] && +m[2] <= +m[1]) || +m[1] < 4) return "";
+    return m[2] ? `${+m[1]}-${+m[2]}mm` : `${+m[1]}mm`;
+  };
+  // The widest aperture: "f/2.8", "F1.8", "f/4-5.6", "1:1.8" ("f2.8", "f4-5.6"). `loose`, for a search: a bare "1.8".
+  const APERTURE = /(?:^|[^a-z0-9])(?:f\s?\/?\s?|1:)(\d{1,2}(?:\.\d{1,2})?)(?:\s?-\s?(\d{1,2}(?:\.\d)?))?(?!\d)/;
+  const APERTURE_LOOSE = /(?:^|\s)(\d\.\d{1,2})(?=\s|$)/;
+  const apertureOf = (raw, loose = false) => {
+    const m = raw.match(APERTURE) || (loose && raw.match(APERTURE_LOOSE));
+    if (!m || !(+m[1] >= 0.9 && +m[1] <= 32)) return "";
+    return `f${+m[1]}${m[2] ? `-${+m[2]}` : ""}`;
+  };
+  // A Canon or Nikon mount right before the focal length ("Canon RF 50mm", "EF-S 18-55mm", "Nikkor Z 24-70mm"): an
+  // RF lens sells for more than the EF one. Sony's and Fujifilm's go unsaid too often to tell apart.
+  const MOUNT = /(?:^|[^a-z0-9-])(ef-?s|ef-?m|ef|rf-?s|rf|z)\s?(?=\d{1,3}(?:\.\d)?(?:\s?-\s?\d{2,4})?\s?mm)/;
+  const mountOf = (raw) => {
+    const m = raw.match(MOUNT)?.[1].replace(/^([er]f)-?([sm])$/, "$1-$2");
+    return m ? `${m} mount` : "";
+  };
+  // A body with a lens: a focal length of 8mm or more anywhere in the title, "kit", or a lens ("with lens"), unless it
+  // says "body only" or "no lens". Not "Interchangeable Lens Camera" (how Sony names a body), a lens cap or a cleaning kit.
+  const NO_KIT = /\b(?:body only|only body|no lens(?:es)?|without (?:a |the |any )?lens(?:es)?|lens(?:es)? (?:not included|sold separately))\b/;
+  const NOT_KIT = /\binterchangeable[\s-]lens\b|\blens(?:es)?[\s-](?:caps?|hoods?|adapters?|cloths?|cleaners?|cleaning|pens?|protectors?|filters?|covers?|mount|style)\b|\b(?:cleaning|repair|accessory|accessories|battery|charger|charging|cage|rig|tool|filter|strap|starter)\s+kits?\b/g;
+  const hasKit = (raw) => {
+    if (NO_KIT.test(raw)) return false;
+    const f = focalOf(raw);
+    if (f && parseFloat(f) >= 8) return true;
+    return /\b(?:kit|lens|lenses)\b/.test(raw.replace(NOT_KIT, " "));
+  };
+  // "camera", "lens" or "" for a search (see above).
+  R.cameraSearch = (query = "") => {
+    const raw = R.fold(String(query ?? "").replace(/(?:^|\s)-\S+/g, " "));
+    const t = R.normTitle(raw);
+    if (!t || NOT_CAMERA.test(t)) return "";
+    const maker = CAMERA_MAKER.test(t);
+    const lens = /(?:^|\s)(?:lens|lenses)(?:\s|$)/.test(t);
+    if (lens || (focalOf(raw, true) && (maker || /\d\s?mm\b/.test(raw)))) return "lens";
+    if (CAMERA_WORD.test(t) || (maker && camSplit(t).split(" ").some(isCamModel))) return "camera";
+    return "";
+  };
+  // What a camera or lens search adds to `same`: its mark, then what it names. A camera search's model ("@a7" for
+  // "sony a7 iii", "canon 5d mark iii") and generation; a lens search's focal length, aperture and mount.
+  const cameraSame = (query, kind) => {
+    const raw = R.fold(String(query ?? "").replace(/(?:^|\s)-\S+/g, " "));
+    const t = camSplit(R.normTitle(raw));
+    if (kind === "lens") return ["#lens", focalOf(raw, true), apertureOf(raw, true), mountOf(raw), camGenOf(t, true)].filter(Boolean);
+    const w = t.replace(/(?:\smark)?\s(?:viii|vii|vi|iv|v|iii|ii|\d)$/, "").split(" ");
+    return ["#camera", camGenOf(t), w.length && `@${w[w.length - 1]}`, /(?:^|\s)kit(?:\s|$)/.test(t) && "kit"].filter(Boolean);
+  };
+  // A title's version the camera way, as [tier, generation, mount or storage] (R.versionOf leaves out what's in `same`).
+  const cameraVersionOf = (title, h, same, kind) => {
+    const raw = R.fold(String(title ?? ""));
+    const t = camSplit(h);
+    if (kind === "lens") {
+      const rawHead = raw.split(/\s(?:with|w\/|includes?|including|bundle)\s|\s[+&]\s/)[0];
+      // A camera with the lens: "camera", "body" or "kit" (not "lens for a7 camera"), or the lens only after "with".
+      const focal = focalOf(rawHead);
+      const kit = (/(?:^|\s)(?:camera|body|dslr|mirrorless|kit)(?:\s|$)/.test(R.normTitle(raw).split(" for ")[0]) || (!focal && focalOf(raw))) && "kit";
+      // "FE" is Sony's full-frame lens line here, not a Galaxy "FE" tier.
+      const tier = [R.variantOf(t.replace(/(^|\s)fe(?=\s|$)/g, "$1"), same.join(" ")), focal, apertureOf(rawHead), kit].filter((x) => x && !same.includes(x));
+      return [tier.join(" "), R.genOf(t) || camGenOf(t, true), mountOf(rawHead)];
+    }
+    // A letter after the search's model is a model of its own: "a7r" in a "sony a7" search (not "a7" itself).
+    const name = same.find((x) => x.startsWith("@") && isCamModel(x.slice(1)))?.slice(1);
+    const model = (name && t.split(" ").find((x) => x.startsWith(name) && /^[a-z]{1,2}$/.test(x.slice(name.length)))) || "";
+    // A body, said or not, is the plain one: a camera's title says "body only" about as often as it leaves it out.
+    const word = R.variantOf(t.replace(model, ""), same.join(" "));
+    const tier = [model, word !== "body only" && word, word !== "body only" && hasKit(raw) && !same.includes("kit") && "kit"].filter(Boolean);
+    return [tier.join(" "), R.genOf(t) || camGenOf(t) || modelNumberOf(t, same) || R.yearOf(t), same.includes("size") ? "" : R.sizeOf(t)];
+  };
+  // Watches and tablets (2026-11-02). Each kind reads its own versions, on the same three axes:
+  //  - watch (Apple Watch, Galaxy Watch, Pixel Watch, Garmin, Fitbit): "Series 7", "Watch5", "Classic" and
+  //    "Active" tiers, a Forerunner's 245; its size is the case ("45mm") and cellular or not, never storage, which a
+  //    model has one of. An Apple Watch SE's year is its generation (2022: the 2nd).
+  //  - tab (Galaxy Tab): "Tab S7" and "Tab A7" are the generation (an S7 and an A7 are a line apart too).
+  //  - surface: Pro, Go, Laptop, Book and Studio are tiers, "Surface Pro 7 i5" is a 7, "11th Edition" an 11.
+  //  - kindle: Paperwhite, Oasis, Scribe, Voyage and Signature are tiers; a Paperwhite 3 is the 7th generation and
+  //    a 2018 Paperwhite the 10th, so a listing matches sales however it says it.
+  //  - fire: "Fire 7", "HD 8", "HD 10", "Max 11" (with "Plus" or "Kids") are tiers, since the number is the screen;
+  //    a year is its generation ("Fire HD 10 2021" is the 11th).
+  //  A tablet's size (these, and an iPad) adds "cellular" to the storage: "Wi-Fi + Cellular" costs more.
+  const WATCH = /(?:^|\s)(?:watch|smartwatch|fitbit|garmin|forerunner|fenix|epix|vivoactive|amazfit)(?:\s|$)/;
+  const FIRE = /(?:^|\s)(?:fire (?:hdx?|max) \d{1,2}|(?:amazon|kindle) fire|fire 7 (?:tablet|\d{1,2}(?:st|nd|rd|th)))(?:\s|$)/;
+  const SURFACE = /(?:^|\s)(?:microsoft surface|surface (?:pro|go|laptop|book|studio|duo))(?:\s|$)/;
+  const TAB = /(?:^|\s)tab ([sa]\d{1,2})(?=\s|$)/;
+  const deviceOf = (h) => {
+    if (FIRE.test(h) && !/(?:^|\s)fire tv(?:\s|$)/.test(h)) return "fire";
+    if (/(?:^|\s)kindle(?:\s|$)/.test(h)) return "kindle";
+    if (SURFACE.test(h)) return "surface";
+    if (TAB.test(h)) return "tab";
+    if (WATCH.test(h)) return "watch";
+    if (/(?:^|\s)(?:ipad|tablet)(?:\s|$)/.test(h)) return "tablet";
+    return "";
+  };
+  // Words a number after which is the model, beyond the search's name (modelNumberOf).
+  const DEVICE_NAMES = { watch: ["watch", "active", "fenix", "vivoactive", "instinct", "charge", "versa", "sense"], surface: ["go", "laptop", "book", "studio"], kindle: ["paperwhite", "oasis"] };
+  // Tier words per kind, longer first; then the usual ones (R.TIER_MODIFIERS).
+  const DEVICE_TIERS = { watch: ["hermes", "classic", "active"], surface: ["pro x", "laptop studio", "laptop go", "pro", "go", "laptop", "book", "studio", "duo"], kindle: ["signature", "paperwhite", "oasis", "scribe", "voyage"] };
+  const tierIn = (h, kind, same) => {
+    const q = same.join(" ");
+    if (kind === "fire") {
+      const line = h.match(/(?:^|\s)(?:(hdx?|max) (\d{1,2})|fire (7))(?=\s|$)/);
+      if (line) {
+        const t = [line[3] ? "fire 7" : `${line[1]} ${line[2]}`, /(?:^|\s)plus(?:\s|$)/.test(h) && "plus", /(?:^|\s)kids(?:\s|$)/.test(h) && "kids"].filter(Boolean).join(" ");
+        return same.includes(t) ? "" : t;
+      }
+    }
+    const words = h.split(" ");
+    const own = (DEVICE_TIERS[kind] || []).find((m) => tierAt(words, m) && !R.hasWord(q, m));
+    // "M1 Pro" is the chip's, not a Pro tier: the chip carries it as its generation.
+    return own || R.variantOf(h.replace(/(^|\s)(m[1-9]) (?:pro|max|ultra)(?=\s|$)/g, "$1$2"), q);
+  };
+  // A generation number said another way, as the one people search for: a Paperwhite 3 or a 2015 Paperwhite is the
+  // 7th generation, an Oasis 2 the 9th, an Apple Watch SE from 2022 the 2nd, a Fire from 2021 the 11th.
+  // `num`: as "3rd gen" is written; `bare`: a number after the name ("Paperwhite 5", the 11th).
+  const PAPERWHITE = { num: { 1: 5, 2: 6, 3: 7, 4: 10 }, bare: { 1: 5, 2: 6, 3: 7, 4: 10, 5: 11, 6: 12 }, year: { 2012: 5, 2013: 6, 2015: 7, 2018: 10, 2021: 11, 2024: 12 } };
+  const OASIS = { num: { 1: 8, 2: 9, 3: 10 }, bare: { 1: 8, 2: 9, 3: 10 }, year: { 2016: 8, 2017: 9, 2019: 10 } };
+  const WATCH_SE = { year: { 2020: 1, 2022: 2, 2025: 3 } };
+  const mapGen = (h, kind, gen, bare = false) => {
+    const has = (w) => new RegExp(`(?:^|\\s)${w}(?:\\s|$)`).test(h);
+    const table = kind === "kindle" ? (has("paperwhite") ? PAPERWHITE : has("oasis") ? OASIS : null) : kind === "watch" && has("apple") && has("se") ? WATCH_SE : null;
+    const n = gen.match(/^gen (\d+)$/)?.[1];
+    // A "5th generation" Paperwhite could be either count, and most often means Amazon's: as written.
+    const nums = bare ? table?.bare : table?.num;
+    if (n && nums?.[n]) return `gen ${nums[n]}`;
+    if (/^\d{4}$/.test(gen)) {
+      if (table?.year?.[gen]) return `gen ${table.year[gen]}`;
+      if (kind === "fire" && +gen >= 2011 && +gen <= 2035) return `gen ${gen - 2010}`;
+    }
+    return gen;
+  };
+  // A title's generation, most exact first: "2nd gen" or "v2" as written, a Surface's "11th Edition", a Galaxy Tab's
+  // "S7", a Forerunner's number, an Apple chip, a phone's model, a number after the thing's name, then a model year.
+  // A phone's model only in a search's own words or a split saved since names were (as modelNumberOf): one saved
+  // before reads as it did.
+  const genIn = (h, same, kind = deviceOf(h), query = false) => {
+    const edition = kind === "surface" && h.match(/(?:^|\s)(\d{1,2})(?:st|nd|rd|th) edition(?:\s|$)/)?.[1];
+    const tab = kind === "tab" && h.match(TAB)?.[1];
+    const fr = kind === "watch" && h.match(/(?:^|\s)forerunner (\d{2,3})(?=\s|$)/)?.[1];
+    const g = R.genOf(h) || (edition && `gen ${+edition}`) || (tab && `tab ${tab}`) || (fr && `forerunner ${fr}`) || R.chipOf(h) || ((query || same.some((x) => x.startsWith("@"))) && R.phoneModelOf(h));
+    if (g) return mapGen(h, kind, g);
+    const bare = modelNumberOf(h, same, kind);
+    return bare ? mapGen(h, kind, bare, true) : mapGen(h, kind, R.yearOf(h));
+  };
+  // A watch's size is its case and whether it's cellular; a tablet's is its storage and whether it's cellular.
+  const CELL = /(?:^|\s)(?:cellular|lte|[345]g|esim)(?:\s|$)/;
+  const NO_CELL = /(?:^|\s)(?:no|non|not|without)\s(?:cellular|lte|[345]g)(?:\s|$)|(?:^|\s)gps only(?:\s|$)|(?:^|\s)wi\s?fi only(?:\s|$)/;
+  const sizeIn = (h, kind) => {
+    if (!kind) return R.sizeOf(h);
+    const cell = CELL.test(h) && !NO_CELL.test(h) ? "cellular" : "";
+    if (kind !== "watch") return [R.sizeOf(h), cell].filter(Boolean).join(" ");
+    const mm = new Set([...h.matchAll(/(?:^|\s)(3[6-9]|4\d|5[0-2])\s?mm(?=\s|$)/g)].map((m) => `${m[1]}mm`));
+    return [mm.size === 1 ? [...mm][0] : "", cell].filter(Boolean).join(" ");
+  };
+  // A title's version as [tier, generation, storage], each "" when it names none, and a fourth, "locked", for a
+  // carrier-locked phone (R.lockOf). `same`: labels that are the thing itself, not a version (the search names them,
+  // or most sales have them); "size" there turns storage off.
+  // A graded card, comic or sealed game: the grader and grade ("psa 10", "bgs 9.5", "cgc 9.8", "wata 9.4"), "" for
+  // a raw one. The grade is the version: a PSA 10 sells for many times a raw card, so each is compared with its own
+  // (a raw card with sales that name no grade). (dabloonery, 2026-11-18, from the competitor audit.)
+  const GRADE = /(?:^|[^a-z0-9])(psa|bgs|beckett|sgc|cgc|cbcs|csg|hga|wata|vga)[\s:#-]*(10|[1-9]\.\d|[1-9]\d|[1-9])(?![0-9.])/;
+  R.gradeOf = (title = "") => {
+    const m = R.fold(String(title ?? "")).match(GRADE);
+    if (!m) return "";
+    const [, who, n] = m;
+    // VGA grades run 10 to 100 ("vga 85"); the rest 1 to 10. "PSA 50" or "CGC 35" isn't a grade.
+    if (who === "vga" ? +n < 10 : +n > 10) return "";
+    return `${who === "beckett" ? "bgs" : who} ${n}`;
+  };
+  R.GRADE_WORD = /^(?:psa|bgs|sgc|cgc|cbcs|csg|hga|wata|vga) /;
+  const versionSeen = new Map(); // (title, same) -> the answer: every card asks again each time the list redraws
+  R.versionOf = (title, same = []) => {
+    const key = `${title ?? ""}\u0001${same.join("|")}`;
+    if (versionSeen.has(key)) return versionSeen.get(key);
+    if (versionSeen.size > 5000) versionSeen.clear();
+    const h = head(title);
+    const cam = same.includes("#camera") ? "camera" : same.includes("#lens") ? "lens" : "";
+    if (cam) {
+      const [tier, gen, size] = cameraVersionOf(title, h, same, cam);
+      const out = [tier, same.includes(gen) ? "" : gen, same.includes(size) ? "" : size];
+      versionSeen.set(key, out);
+      return out;
+    }
+    const kind = deviceOf(h);
+    // A graphics card or a processor: its model is the version ("rtx 3060 ti"), and a card's size is its memory
+    // ("12gb"). No tier: "Ultra", "Mini" and "Slim" there are a maker's line ("FTW3 Ultra", "ITX Mini", "Gaming X
+    // Slim"), and "Core Ultra 7" is in the model. Not in a Mac (its chip or year says more than its Intel model), a
+    // Surface, a tablet or a watch, which read their own.
+    const part = APPLE.test(h) || kind ? "" : R.partOf(h);
+    // A console's own reading (R.consoleOf) comes first, but not for a typical price saved before it ("@" names came
+    // then): one saved before reads as it did.
+    const con = !part && !kind && same.some((x) => x.startsWith("@")) ? R.consoleOf(h) : null;
+    const tier = R.gradeOf(title) || (part ? "" : con?.tier ?? tierIn(h, kind, same));
+    const gen = part || (con?.gen && !R.genOf(h) ? con.gen : genIn(h, same, kind));
+    const size = same.includes("size") ? "" : part && !PC_BUILD.test(h) ? (isGpu(part) ? R.vramOf(h) : "") : sizeIn(h, kind);
+    const out = [same.includes(tier) ? "" : tier, same.includes(gen) ? "" : gen, same.includes(size) ? "" : size];
+    const lock = R.lockOf(title); // the whole title: "iPhone 13 with case - Unlocked"
+    if (lock && !same.includes(lock)) out.push(lock);
+    versionSeen.set(key, out);
+    return out;
+  };
+  // The groups a sale counts in: its tier always, its generation and size or any ("*"). "lite/*/*" is every Lite,
+  // "/gen 2/*" every plain second generation, "/*/256gb" every plain 256GB one.
+  // A carrier-locked phone's sales count only in groups of locked ones: "pro/gen 13/*/locked".
+  const patternsOf = ([t, g, s, l]) => [`${t}/${g || "*"}/${s || "*"}`, `${t}/${g || "*"}/*`, `${t}/*/${s || "*"}`, `${t}/*/*`].map((p) => (l ? `${p}/${l}` : p));
+  // The patterns a listing tries, most like it first: its whole version, then any size, then any generation. A locked
+  // phone tries locked sales first, then the rest (and the hover says there were too few locked ones).
+  const lookupsOf = ([t, g, s, l]) => {
+    const ps = [`${t}/${g || "*"}/${s || "*"}`, `${t}/${g || "*"}/*`, `${t}/*/*`];
+    return [...new Set([...(l ? ps.map((p) => `${p}/${l}`) : []), ...ps])];
+  };
+  // Sales split by version, for TK.summarizeSold: { same, groups: { "lite/*/*": [sales], "/gen 2/*": […], … } }. A
+  // label the search names, or a tier word over 60% of the sales have ("20V Max" on nearly every DeWalt drill), is the
+  // thing itself (same); a search that names a size turns storage off. A size or generation most sales have still
+  // sets them apart from the rest, so those stay.
+  R.VARIANT_COMMON = 0.6;
+  R.variantGroups = (sales, query = "") => {
+    const same = [...R.TIER_MODIFIERS.filter((m) => R.hasWord(query, m)), ...[R.generationOf(query)].filter(Boolean), ...(R.sizeOf(query) ? ["size"] : []), ...[R.lockOf(`phone ${query}`)].filter(Boolean)];
+    const cam = R.cameraSearch(query);
+    for (const x of cam ? cameraSame(query, cam) : searchName(query)) if (!same.includes(x)) same.push(x);
+    const qh = head(query), qt = cam ? "" : tierIn(qh, deviceOf(qh), []);
+    if (qt && !same.includes(qt)) same.push(qt); // "fire hd 10": every sale is an HD 10
+    const qg = R.gradeOf(query);
+    if (qg && !same.includes(qg)) same.push(qg); // "charizard psa 10": every sale is a PSA 10
+    // A console the search names: "xbox series x" is the Series X ("series x", "xbox series"), "ps5" the fifth.
+    const qc = cam ? null : R.consoleOf(head(query));
+    for (const x of [qc?.tier, qc?.gen]) if (x && !same.includes(x)) same.push(x);
+    const counts = new Map();
+    for (const s of sales) {
+      const [t, , , l] = R.versionOf(s.title, same);
+      for (const x of [t, l]) if (x) counts.set(x, (counts.get(x) || 0) + 1); // nearly all locked ("iphone 13 verizon"): the thing itself
+    }
+    // Not a grade, though: on a page of mostly PSA 10s a raw card is still compared with raw ones.
+    for (const [t, n] of counts) if (n > sales.length * R.VARIANT_COMMON && !R.GRADE_WORD.test(t)) same.push(t);
+    // A card or processor every sale is ("rtx 3060" on a page of only plain 3060s) is the thing itself: no group of
+    // its own would differ from the whole, and a listing of it isn't missing sales of its kind.
+    const parts = new Set(sales.map((s) => R.partOf(head(s.title))));
+    if (parts.size === 1 && sales.length && [...parts][0]) same.push([...parts][0]);
+    const groups = {};
+    for (const s of sales) for (const p of new Set(patternsOf(R.versionOf(s.title, same)))) (groups[p] ||= []).push(s);
+    return { same, groups };
+  };
+  // The typical price for this listing's kind, when the sales had enough of it: a Lite against Lites, a 256GB iPhone 13
+  // against 256GB ones, a plain Switch against sales that name no tier, so OLEDs don't lift its typical price.
+  // market.variants is from TK.summarizeSold (only groups worth trusting are kept). With no group for its kind, the
+  // whole market, as before. Returns the market as is, or a copy with that group's numbers, variantUsed (the pattern)
+  // and variantWords (what the listing was matched on: ["lite"], ["gen 2", "256gb"], [] for a plain one), and
+  // variantMissing: its tier or generation when there were too few sales of it.
+  // A narrower lookup remembered from today (market.narrower: [{ q, market }], the sold cache): "switch lite" for a
+  // Lite on a "nintendo switch" page whose own Lite sales are too few. It counts when every word of that search is
+  // in the title and it names the version that's missing. No new lookup is made.
+  const narrowerFor = (market, f, missing) => {
+    const names = (market.variants?._same || []).filter((x) => x.startsWith("@") || x.startsWith("#"));
+    for (const { q, market: m } of market.narrower || []) {
+      if (!(m?.median > 0) || m.confidence === "rough" || !(m.n >= 5) || R.missingWord(f.title, q) || R.offSearch(f.title, q)) continue;
+      const [t, g, , l] = R.versionOf(q, names);
+      if (missing.every((w) => w === t || w === g || w === l)) return { q, m };
+    }
+    return null;
+  };
+  R.forVariant = (market, f) => {
+    const vs = market?.variants;
+    if (!vs || !f?.title) return market;
+    const v = R.versionOf(f.title, vs._same || []);
+    const p = lookupsOf(v).find((k) => vs[k]?.median > 0 && vs[k].confidence !== "rough");
+    // Its tier or generation without enough sales of its own (variantMissing, for the hover): "lite" compared with
+    // the whole market, a Switch 2 with sales of any generation. Unless a narrower lookup of it is remembered.
+    const want = [v[0], v[1], v[3]].filter(Boolean);
+    const [t, g, s, l] = (p || "").split("/");
+    const words = [t, g, s, l].filter((x) => x && x !== "*");
+    const missing = want.filter((w) => !words.includes(w));
+    const alt = missing.length && narrowerFor(market, f, missing);
+    if (alt) {
+      const { variants, narrower, ...rest } = market;
+      const m = alt.m;
+      return { ...rest, median: m.median, p10: m.p10, p25: m.p25, p75: m.p75, n: m.n, confidence: m.confidence, ...(m.ship > 0 && { ship: m.ship }), query: alt.q, variantUsed: want.join("/"), variantWords: want, variantQuery: alt.q };
+    }
+    if (!p) return want.length ? { ...market, variantMissing: want } : market;
+    const sub = vs[p];
+    const { variants, narrower, ...rest } = market;
+    const tiers = [...new Set(Object.keys(vs).map((k) => k.split("/")[0]).filter((x) => x && !x.startsWith("_")))];
+    return { ...rest, median: sub.median, p10: sub.p10, p25: sub.p25, p75: sub.p75, n: sub.n, confidence: sub.confidence, variantUsed: p, variantWords: words, ...(!t && tiers.length && { variantOthers: tiers }), ...(missing.length && { variantMissing: missing }) };
+  };
+  // The words a version adds to the search, for cheapReason: "lite gen 2 256gb". "" for none.
+  // A version word as people say it: "2nd generation", "128GB", "“lite”".
+  R.kindWord = (w) => {
+    const g = w.match(/^gen (\d+)$/)?.[1];
+    if (g) return `${g}${["th", "st", "nd", "rd"][+g % 100 > 10 && +g % 100 < 14 ? 0 : +g % 10] || "th"} generation`;
+    if (/^v \d+$/.test(w)) return `\u201c${w.replace(" ", "").toUpperCase()}\u201d`; // a revision: "V2"
+    if (/^m\d(?: (?:pro|max|ultra))?$/.test(w)) return w.replace(/^m/, "M").replace(/ (\w)/, (_, c) => ` ${c.toUpperCase()}`); // a chip: "M2 Pro"
+    if (/^\d{4}$/.test(w)) return w; // a model year
+    if (w === "locked") return "carrier-locked";
+    if (R.GRADE_WORD.test(w)) return w.toUpperCase(); // a grade: "PSA 10"
+    if (/^(?:[sa]\d{1,2}e?|x|xr|xs)$/.test(w)) return w.toUpperCase(); // a phone: "S21", "A54", "iPhone XR"
+    if (/^(?:note|fold|flip) \d+$/.test(w)) return w.charAt(0).toUpperCase() + w.slice(1); // "Note 20", "Fold 5"
+    if (/^\d{1,2}[asc]$/.test(w)) return w; // "Pixel 7a", "iPhone 6s"
+    const part = w.match(/^(rtx|gtx|gt|rx|arc|ryzen|i[3579]|ultra [579]) (\w+)((?: \w+)*)$/);
+    if (part) { // a card or processor: "RTX 3060 Ti", "RX 6700 XT", "Ryzen 5600X", "i7-12700K", "Core Ultra 7 265K"
+      const [, brand, num, rest] = part;
+      const suffix = rest.replace(/\w+/g, (x) => ({ ti: "Ti", super: "Super" })[x] || x.toUpperCase());
+      if (/^i\d$/.test(brand)) return `${brand}-${num.toUpperCase()}`;
+      if (brand.startsWith("ultra")) return `Core Ultra ${brand.slice(6)} ${num.toUpperCase()}`;
+      return `${brand === "ryzen" || brand === "arc" ? brand[0].toUpperCase() + brand.slice(1) : brand.toUpperCase()} ${num.toUpperCase()}${suffix}`;
+    }
+    const tab = w.match(/^tab ([sa])(\d+)$/);
+    if (tab) return `Tab ${tab[1].toUpperCase()}${tab[2]}`; // a Galaxy Tab: "Tab S7"
+    const mount = w.match(/^(\S+) mount$/)?.[1];
+    if (mount) return `${mount.toUpperCase()} mount`; // "RF mount"
+    // A camera's model or a lens: "“A7R”", "“A7R kit”", "24-70mm f/2.8".
+    const parts = w.split(" ");
+    if (parts.some((x) => /^\d+(?:\.\d+)?(?:-\d+)?mm$|^f\d/.test(x))) return parts.map((x) => x.replace(/^f(?=\d)/, "f/")).join(" ");
+    if (parts.some(isCamModel)) return `\u201c${parts.map((x) => (isCamModel(x) ? x.toUpperCase() : x)).join(" ")}\u201d`;
+    if (/^forerunner \d+$/.test(w)) return `Forerunner ${w.split(" ")[1]}`;
+    if (/^(?:fire|hdx?|max) \d+/.test(w)) return `Fire ${w.replace(/^fire /, "").replace(/\b(hdx?)\b/, (x) => x.toUpperCase()).replace(/\b(max|plus|kids)\b/g, (x) => x[0].toUpperCase() + x.slice(1))}`; // "Fire HD 10 Plus"
+    if (/^(?:\d+mm|\d+(?:gb|tb))?(?: ?cellular)?$/.test(w) && w) return w.replace(/(\d+)(gb|tb)/, (_, n, u) => n + u.toUpperCase()); // "45mm cellular", "128GB cellular"
+    return /^\d+(?:gb|tb)$/.test(w) ? w.toUpperCase() : `\u201c${w}\u201d`;
+  };
+  R.variantLike = (market) => (market?.variantWords || []).join(" ");
+
+  // Sold totals include the shipping buyers paid; a pickup listing (a local site, no shipping on it) has none
+  // to pay, so it's compared with the typical price less the typical shipping. Otherwise a $40 pickup price
+  // read as 77% of a $52 total that was $40 plus $12 to post. Only when the sales say what shipping cost
+  // (market.ship) and it's under half the price. Returns the market as is, or a copy with pickupShip set.
+  // A pickup listing's market also has local set (cheapLevel's fee allowance), with or without shipping taken off,
+  // and localNet: what's left of a sale after the fee in settings (feePct; 13.6% without one).
+  R.forPickup = (market, f, local, feePct) => {
+    market = R.forVariant(market, f);
+    const ship = market?.ship;
+    if (!local || !(market?.median > 0) || f?.shipping != null || f?.auction) return market;
+    const localNet = R.localNet(feePct);
+    if (!(ship > 0) || !(market.median > ship * 2)) return { ...market, local: true, localNet };
+    const r = (n) => Math.round(n * 100) / 100;
+    return { ...market, median: r(market.median - ship), ...(market.p10 > 0 && { p10: r(Math.max(1, market.p10 - ship)) }), p25: r(Math.max(1, (market.p25 ?? market.median) - ship)), p75: r((market.p75 ?? market.median) - ship), pickupShip: ship, local: true, localNet };
+  };
+
+  // When the score and the price disagree, the price check wins (2026-10-15). Far under the typical
+  // price: the bait, so the verdict turns to a warning ("Great price, if it's real"); well over it: no better
+  // than Fair price. `it` needs total (and auction/lot/project); market is { median, confidence }.
+  // Returns { v, label? }: the verdict to show, and a label when it isn't the verdict's usual one.
+  // When it does change the verdict, the score moves into the new verdict's range (as fitScore does for the
+  // model's own answer), so the number never says "82" beside "Fair price" or "91" beside a warning, and
+  // `why` says what the price check saw, in place of a model reason that may still praise the price.
+  R.ABOVE_CAP = 1.25;
+  // it.cheapWhy: why the model says a low price is low ("flaw", "missing parts", "different model", "quick sale"
+  // or ""). A reason it read in the listing can beat the price check (dabloonery, 2026-10-21): under the softer cutoff a
+  // scan's or Analyze's word stands, no better than Good price; under the firm one only Analyze (opts.deep, which read
+  // the whole listing) clears it, no better than Fair price, for something missing or a cheaper version (a flaw doesn't
+  // take 60% off: it's the story bait tells, as in cheapLevel), and never beside a strong seller sign or another
+  // scam sign. A "quick sale" is no reason: bait tells that story most.
+  R.MODEL_WHY = ["flaw", "missing parts", "different model"];
+  R.priceVerdict = (verdict, it, market, { deep = false } = {}) => {
+    const keep = { v: verdict };
+    if (!(verdict in R.RANK) || verdict === "pass" || !it || it.total == null || it.foreign || !(market?.median > 0)) return keep;
+    const typical = R.dollars(Math.round(market.median));
+    const pct = Math.round((it.total / market.median) * 100);
+    const moved = (v, extra) => ({ v, ...(it.score != null ? { score: R.fitScore(v, it.score) } : {}), ...extra });
+    // Cheap and saying why (a flaw, something missing, a cheaper version): the scan's word stands, but no better
+    // than Good price, since it isn't the whole thing at a great price.
+    const said = R.cheapForReason(it, market);
+    // A title code no scan has cleared, with a price under the typical one: the bulk-posted fake, whatever the reason.
+    if (said && it.titleCode && !it.codeOk) return moved("suspicious", { label: "Great price, if it’s real", why: `${R.dollars(it.total)} is ${said.pct}% of the typical ${typical}, and the title ends with the code ${it.titleCode}, as bulk-posted fakes do: check it's real before you pay.` });
+    if (said) return R.RANK[verdict] > R.RANK.good ? moved("good", { why: `Held at Good price: ${R.dollars(it.total)} is ${said.pct}% of the typical ${typical}, ${said.why ? `and the listing says why (“${said.why}”)` : "from an established eBay seller"}.` }) : keep;
+    const cheap = R.tooCheap(it, market);
+    const read = cheap && verdict !== "suspicious" && R.MODEL_WHY.includes(it.cheapWhy) && R.RANK[verdict] > R.RANK.pass;
+    if (read && cheap.level === "low") return R.RANK[verdict] > R.RANK.good ? moved("good", { why: `Held at Good price: ${R.dollars(it.total)} is ${cheap.pct}% of the typical ${typical}; the scan read why (${it.cheapWhy}). Check the photos show it.` }) : keep;
+    if (read && deep && it.cheapWhy !== "flaw" && !cheap.seller && !R.likelyScam(it) && !(it.titleCode && !it.codeOk)) return R.RANK[verdict] > R.RANK.fair ? moved("fair", { why: `Held at Fair price: ${R.dollars(it.total)} is ${cheap.pct}% of the typical ${typical}, far under it; the listing gives a reason (${it.cheapWhy}). Check the photos show it before you pay.` }) : keep;
+    if (cheap) return moved("suspicious", { level: cheap.level, label: "Great price, if it’s real", why: `${R.dollars(it.total)} is ${cheap.pct}% of the typical ${typical}${cheap.seller ? `, from ${cheap.seller}` : ""}. Far under what the same thing sells for is the usual bait: check it's real before you pay.` });
+    if (!it.auction && !it.lot && !it.project && !it.accessory && !it.priceRange && it.related !== false && it.total > market.median * R.ABOVE_CAP && R.RANK[verdict] > R.RANK.fair) return moved("fair", { why: `Held at Fair price: ${R.dollars(it.total)} is ${pct}% of the typical ${typical}.` });
+    return keep;
+  };
+  // The first word of the search that the title doesn't have ("" if it has them all). Spacing and hyphens
+  // don't count ("K-1000" has "k1000"), nor a plural "s"; words the search leaves out ("-case") and short ones
+  // ("a", "of", "3") are skipped.
+  const searchWords = (query) =>
+    R.quickTerms(String(query)).filter((t) => !t.not).flatMap((t) => R.normTitle(t.w).split(" ")).filter((w) => w.length >= 3 && !/^(?:and|the|for|with|used|new)$/.test(w));
+  // A word with a number in it ("4tb", "ps5", "128gb") is a spec: it has to be there on its own, so a "4tb" search
+  // doesn't find "24TB" or "14TB" (a real eBay drive search had both), though "4 TB" still counts.
+  const isSpec = (w) => /\d/.test(w) && /[a-z]/.test(w);
+  const specIn = (norm, w) => new RegExp(`(?<![a-z0-9])${w.replace(/(\d)(?=[a-z])|([a-z])(?=\d)/g, "$1$2 ?").replace(/^ps(?= \?\d)/, "(?:ps|playstation)")}(?!\\d)`).test(norm);
+  const inTitle = (norm, w) => {
+    if (isSpec(w)) return specIn(norm, w);
+    const flat = norm.replace(/\s+/g, "");
+    return flat.includes(w) || flat.includes(w.replace(/s$/, ""));
+  };
+  R.missingWord = (title, query = "") => {
+    const norm = R.normTitle(title);
+    if (!norm.trim()) return "";
+    return searchWords(query).find((w) => !inTitle(norm, w)) || "";
+  };
+  // None of the search's words in the title: Marketplace fills a search with whatever is for sale nearby ("Phone",
+  // "Bose soundlink" in an "ipod classic" search, 70 of 90 cards in one), and its price says nothing against
+  // the search's typical price. Not compared at all (compareFacts), so no "Great price" or "Check first" from it.
+  // A two-letter search ("ds", "tv") counts too, as a word of its own ("3DS", "DSi" and "TVs" have it, "DVDs" doesn't):
+  // a real "ds" search had DVDs, a PS3 and a garage sale all marked against the DS's typical price.
+  // A spec the search names and the title lacks ("2TB" in a "4tb hard drive" search) is another thing too, and so is
+  // a card with no words at all to go on (a real one was titled "📸📸", free).
+  R.offSearch = (title, query = "") => {
+    const words = searchWords(query);
+    const norm = R.normTitle(title);
+    const short = R.quickTerms(String(query)).filter((t) => !t.not).flatMap((t) => R.normTitle(t.w).split(" ")).filter((w) => /^[a-z]{2}$/.test(w));
+    const hasShort = (w) => norm.split(" ").some((x) => new RegExp(`^\\d*${w}[a-z]?$`).test(x));
+    if (!words.length && !short.length) return false;
+    if (!norm.trim()) return true;
+    return (!words.some((w) => inTitle(norm, w)) && !short.some(hasShort)) || words.some((w) => isSpec(w) && !specIn(norm, w));
+  };
+
+  // An accessory or part for what was searched, not the thing itself: "Case for Nintendo Switch",
+  // "Switch carrying case", "Game Boy SP replacement shell", "box only". Its price says nothing against the
+  // typical price of the thing (a $15 case is 7% of a $200 console, which read as "Likely scam"), so it gets no
+  // page-wide comparison; it can still be priced from its own title. A word the search has ("switch case")
+  // doesn't count, and one after "with" or "includes" is what comes with the item ("Switch with case").
+  // Returns the word that gave it away, or "".
+  const PART = "case|cover|skin|sleeve|bag|pouch|stand|mount|dock|holder|strap|charger|charging cable|cable|cord|power supply|adapter|battery|" +
+    "remote|controller|grip|protector|decal|sticker|faceplate|shell|housing|manual|box|lens cap|lens hood|bezel|" +
+    "charging station|stylus|knob|buttons?|ribbon cable|hinge|motherboard|" +
+    // beyond electronics: a mixer's bowl, a blender's jar, a vacuum's attachments, a chair's pads, a bike's wheel, a
+    // LEGO set's minifigures (each read as the thing at a bait price: a $40 Vitamix container was "Likely scam")
+    "bowl|container|pitcher|jar|lid|blade|filter|attachment|cushion|pad|wheel|tire|pedal|saddle|minifig|minifigure";
+  const PART_LAST = new RegExp(String.raw`(?:^|\s)((?:${PART})s?)$`);
+  const PART_FOR = new RegExp(String.raw`(?:^|\s)((?:${PART})s?) (?:only|for)\b`);
+  // A part, a few words, then "for" and the search: "Composite AV Video Cable w USB Charge/Sync for iPod iPhone iPad".
+  const PART_FOR_LATER = new RegExp(String.raw`(?:^|\s)((?:${PART})s?)(?: \S+){1,4} for (?!sale|parts|repair|cheap|free)(.*)$`);
+  const PART_ANY = /\b(compatible with|for use with|replacement|screen protector|tempered glass|empty box|box only|no (?:console|camera|phone|watch|tablet|laptop|device|unit|handset|system|body)|video game(?! (?:console|system))|game cartridge|(?:cartridge|cart|disc|game|case) only|game disc|physical copy|(?:digital|download) code|game card|(?:(?:left|right) )?(?:earbud|airpod|ear ?bud)s? only)\b/;
+  // "with", "in", "all", a count ("2 controllers"), or a word that says it's the whole thing: what comes with the item.
+  const WITH = /(?:^|\s)(?:with|w|in|includes?|including|incl|plus|and|all|console|system|bundle|cib|complete)(?:\s|$)/; // "all attachments": it has them
+  const PART_AND = new RegExp(String.raw`\b((?:${PART})s?) and (?=(?:${PART})s?\b)`, "g");
+  const GAME = /(?:^|\s)(games?)(?!\s(?:consoles?|systems?|boy|cube|gear|pad|controller|card))(?:\s|$)/;
+  const comesWith = (t, m) => WITH.test(t.slice(0, m.index + 1)) || (/s$/.test(m[1]) && /(?:^|\s)\d+\s?$/.test(t.slice(0, m.index + 1)));
+  // "...NEW BATTERY", "3000mAh Battery", "SSD Wolfson DAC Battery": a battery put in it, the way refurbished
+  // iPods, phones and handhelds are sold (12 of 60 cards in a real iPod search), not a battery for sale.
+  const FITTED = /(?:^|\s)(?:new|fresh|upgraded|replaced|rebuilt|\d+ ?mah|dac|ssd|mod|modded)\s$/;
+  R.accessoryOf = (title, query = "") => {
+    // "+" and "&" join what comes with it: "Switch OLED + 3 games + case" is a console with a case.
+    // "+" and "&" join what comes with it: "Switch OLED + 3 games + case" is a console with a case. Two parts
+    // joined by "and" are both the listing ("Switch OLED dock and charger"), not a console and its charger.
+    const t = R.normTitle(String(title ?? "").replace(/\s*[+&]\s*/g, " with ")).replace(/\s+/g, " ").replace(PART_AND, "$1 ");
+    if (!t || !String(query).trim()) return "";
+    const has = (w) => R.hasWord(query, w) || R.hasWord(query, w.replace(/s$/, ""));
+    const any = t.match(PART_ANY)?.[1];
+    if (any && !has(any)) return any;
+    // "Game" in a console search is a game ("Pokemon Scarlet Nintendo Switch OLED Game"), unless it's the
+    // machine ("handheld game console") or comes with it ("console with game").
+    const game = PLATFORM.test(R.normTitle(query)) && !has("game") && t.match(GAME);
+    if (game && !comesWith(t, game)) return "game";
+    const forOnly = t.match(PART_FOR);
+    if (forOnly && !has(forOnly[1]) && !comesWith(t, forOnly)) return forOnly[1];
+    const forLater = t.match(PART_FOR_LATER);
+    if (forLater && !has(forLater[1]) && !comesWith(t, forLater) && !R.offSearch(forLater[2], query) && R.offSearch(t.slice(0, forLater.index), query)) return forLater[1];
+    const last = t.match(PART_LAST);
+    if (last && !has(last[1]) && !comesWith(t, last) && !(/^batter/.test(last[1]) && FITTED.test(t.slice(0, last.index + 1)))) return last[1];
+    return R.madeFor(title, query);
+  };
+  // A game (or anything else) named after the thing it's for: "Mario Kart 8 Deluxe - Nintendo Switch", "Zelda:
+  // Breath of the Wild (Nintendo Switch)", "Minecraft for Nintendo Switch". The search's words all come after a
+  // dash, a bracket or "for", none come before, and what comes before names something: not just "Brand new" or a
+  // color. Bait copies the search's words first ("Nintendo Switch OLED - fast shipping"), so it stays priced.
+  // Returns what it names (folded, "mario kart 8 deluxe"), or "".
+  const FILLER = new Set(("brand|new|sealed|factory|mint|used|working|tested|great|good|excellent|like|rare|clean|nice|wow|look|" +
+    "free|fast|shipping|bundle|console|system|lot|oem|genuine|authentic|original|official|the|a|an|white|black|red|blue|neon|gray|" +
+    "grey|pink|green|coral|turquoise|purple|yellow|silver|gold|edition|limited|special|hot|sale|deal|cheap|wholesale|unlocked|refurbished|" +
+    "renewed|apple|sony|nintendo|microsoft|samsung|google|canon|nikon").split("|"));
+  const PLATFORM = /\b(?:switch|ps[1-5]|playstation|xbox|game ?boy|gba|n?3?ds|wii|gamecube|n64|nintendo 64|snes|nes|genesis|dreamcast|vita|psp|steam deck)\b/;
+  const MACHINE = /^(?:console|consoles|system|bundle|handheld|lite|oled|slim|pro|modded|jailbroken|hacked|\d+(?:gb|tb))$/;
+  const TAIL_OK = new Set("game|games|video|edition|version|physical|digital|ntsc|pal|us|usa|cib|complete|new|sealed|for|the|and|nintendo|sony|microsoft|sega".split("|"));
+  R.madeFor = (title, query = "") => {
+    const raw = String(title ?? "");
+    for (const m of raw.matchAll(/\s[-\u2013\u2014|:]\s|\s*[(\[]|\s+for\s+/gi)) {
+      const head = raw.slice(0, m.index), tail = raw.slice(m.index + m[0].length);
+      // The tail names the search, or the console part of it ("- Nintendo Switch" in a "switch oled" search)…
+      if (R.missingWord(tail, query) && !PLATFORM.test(R.normTitle(tail))) continue;
+      // …and little else: "- PS5", "(Nintendo Switch, 2017)", not "- Apple iPhone 13 128GB" or "(PS5) Disc Edition".
+      const q = R.normTitle(query).split(" ").filter(Boolean);
+      const rest = R.normTitle(tail).split(" ").filter((w) => w && !q.some((x) => w.includes(x) || x.includes(w)) && !TAIL_OK.has(w) && !/^(?:19|20)\d\d$/.test(w));
+      if (rest.length) return "";
+      const words = R.normTitle(head).split(" ").filter(Boolean);
+      const flat = words.join("");
+      if (R.normTitle(query).split(" ").some((q) => q.length >= 3 && flat.includes(q))) return ""; // named first: the thing itself
+      // One word before a dash may be the brand ("Apple - iPhone 13"); before "for" it's the thing ("Minecraft for …").
+      const named = words.filter((w) => !FILLER.has(w) && !/^\d+$/.test(w));
+      return named.length >= 2 || (named.length && /for/i.test(m[0])) ? words.join(" ") : "";
+    }
+    // A game console searched for, and the search at the very end with no separator: "Mario Kart 8 Deluxe Nintendo
+    // Switch". Two or more words that name something, none that say it's the machine ("console", "bundle", "32gb").
+    // Only for consoles: elsewhere the same shape is the thing itself ("Vintage Film Camera Pentax K1000").
+    const t = R.normTitle(raw), qn = R.normTitle(query);
+    if (!qn || !PLATFORM.test(qn) || !t.endsWith(` ${qn}`)) return "";
+    const words = t.slice(0, -qn.length).trim().split(" ");
+    const named = words.filter((w) => !FILLER.has(w) && !/^\d+$/.test(w));
+    return named.length >= 2 && !words.some((w) => MACHINE.test(w)) ? words.join(" ") : "";
+  };
+
+  // "Seller may take less": what a listing shows that usually means room to haggle. Each sign is a short
+  // reason; two or more make it likely. drops: price drops you've seen; days: how long it's been listed (or
+  // since you first saw it); motivated: "moving sale" and the like; bestOffer: the site's own offer button.
+  R.softSeller = ({ drops = 0, days = null, motivated = "", bestOffer = false } = {}) => {
+    const why = [];
+    if (drops >= 1) why.push(drops === 1 ? "the price dropped once" : `the price dropped ${drops} times`);
+    if (days != null && days >= 30) why.push(`listed for ${days >= 60 ? `${Math.round(days / 30)} months` : `${Math.round(days)} days`}`);
+    if (motivated) why.push(`“${motivated}”`);
+    if (bestOffer) why.push("takes offers");
+    return { level: why.length >= 2 ? "likely" : why.length ? "some" : "none", why };
+  };
+
+  // Friendly offer amounts: whole dollars under $20, fives under $100, tens above. Always rounded down.
+  R.roundOffer = (n) => {
+    const step = n < 20 ? 1 : n < 100 ? 5 : 10;
+    return Math.max(step, Math.floor(n / step) * step);
+  };
+  // An opening offer and the most worth paying, worked out from sold prices, with the reasons. Totals
+  // include shipping (that's how sold prices compare); the amounts to offer are for the item alone.
+  // Opens midway between the cheaper quarter of sales and the median (at the cheaper quarter when the
+  // seller looks soft), never above the asking price, never under 60% of it (lower reads as a lowball
+  // and gets ignored). Walk away above the median. Returns null when there's nothing solid to go on.
+  R.offerPlan = ({ price, shipping = 0, auction, lot, project, foreign, priceRange, soft = "none" } = {}, market) => {
+    if (!(market?.median > 0) || !(market.p25 > 0) || price == null || !(price > 0) || auction || lot || project || foreign || priceRange) return null;
+    const ship = Number(shipping) || 0;
+    const total = price + ship;
+    const reasons = [`the typical price is $${market.p25}–$${market.p75} (${market.n} recent eBay sales)`];
+    if (total <= market.p25) return { cheap: true, open: null, walkAway: null, reasons: [`it's already under most sales: ${reasons[0]}`], confidence: market.confidence };
+    const target = soft === "likely" ? market.p25 : (market.p25 + market.median) / 2;
+    const open = R.roundOffer(Math.max(price * 0.6, Math.min(price, target - ship)));
+    const walkAway = R.roundOffer(Math.min(price, market.median - ship));
+    if (soft !== "none") reasons.push(soft === "likely" ? "the seller looks ready to take less" : "the seller may take less");
+    return { cheap: false, open: Math.min(open, walkAway), walkAway, reasons, confidence: market.confidence };
+  };
+  // Messages to send a seller, from templates (free and predictable). local: pickup sites; bestOffer on
+  // eBay means using its Make offer button, so there's no message, only the amount.
+  R.offerMessages = (amount, { local = false, bestOffer = false, site = "" } = {}) => {
+    if (!(amount > 0)) return [];
+    if (bestOffer && site === "ebay") return [{ id: "button", label: "Make offer", text: `Use eBay's Make offer button with $${amount}.`, button: true }];
+    const pickup = local ? " I can pick up whenever suits you." : "";
+    return [
+      { id: "friendly", label: "Friendly", text: `Hi! Is this still available? Would you take $${amount}?${pickup}` },
+      { id: "direct", label: "Direct", text: `Hi, I can offer $${amount}${local ? " cash, and pick up today or tomorrow" : ""}. Let me know if that works.` },
+      { id: "why", label: "With a reason", text: `Hi! Similar ones have been selling for around this, so would you take $${amount}?${pickup}` },
+    ];
+  };
+
+  // The analysis's offer range, kept near the plan from sold prices: the model may move it for what it read in
+  // the listing, but not below 90% of the plan's opening offer or above its walk-away price. A rough reference,
+  // no plan, or a range of 0 (no haggling) leaves the model's numbers as they are. Returns [low, high].
+  R.fitOffer = (low, high, plan) => {
+    if (!(high > 0) || !plan || plan.cheap || plan.confidence === "rough" || !(plan.open > 0)) return [low, high];
+    const top = Math.max(plan.open, plan.walkAway || 0);
+    const floor = R.roundOffer(plan.open * 0.9);
+    const lo = Math.min(top, Math.max(floor, low | 0));
+    return [lo, Math.min(top, Math.max(lo, high | 0))];
+  };
+  // When the seller answers with a price: take it, meet in the middle, or offer the walk-away price once.
+  // plan: { open, walkAway } (from offerPlan, or the analysis's range). Returns { action, amount, why } or null.
+  R.counterOffer = (plan, theirs) => {
+    theirs = Number(theirs);
+    if (!(plan?.open > 0) || !(theirs > 0)) return null;
+    const open = plan.open;
+    const top = plan.walkAway > open ? plan.walkAway : open;
+    if (theirs <= open) return { action: "accept", amount: theirs, why: "that's at or under your opening offer" };
+    if (theirs <= top) {
+      let mid = R.roundOffer((open + theirs) / 2);
+      if (mid <= open) mid = Math.round((open + theirs) / 2); // rounding mustn't land back on the offer they turned down
+      if (theirs - mid < Math.max(5, theirs * 0.05)) return { action: "accept", amount: theirs, why: "that's within what you planned to pay" };
+      return { action: "counter", amount: mid, why: `it's under your walk-away price, and meeting in the middle saves $${theirs - mid}` };
+    }
+    return { action: "last", amount: top, why: `it's over your walk-away price of $${top}` };
+  };
+  // The reply to send for a counterOffer answer. On eBay with best offer, the answer goes through its offer page.
+  R.counterMessage = (c, { local = false, bestOffer = false, site = "" } = {}) => {
+    if (!c) return "";
+    if (bestOffer && site === "ebay") return c.action === "accept" ? `Accept their counteroffer of $${c.amount} on eBay.` : `Counter with $${c.amount} on eBay's offer page.`;
+    if (c.action === "accept") return `Deal, $${c.amount} works for me.${local ? " When can I pick it up?" : ""}`;
+    if (c.action === "counter") return `Thanks! Could we meet in the middle at $${c.amount}?`;
+    return `Thanks, but $${c.amount} is the most I can do. Let me know if that works.`;
+  };
+
+  // Words that say "fix-up project" (what a fixer hunts for, and Marketplace can't search for all at
+  // once) and words that say the seller wants it gone. Read from the title and card text.
+  R.PROJECT =
+    /\b(for parts(?: or repair| only)?|parts only|parts or repair|not working|non[- ]?working|untested|as[- ]is|broken|no power|won'?t (?:turn|power) on|doesn'?t (?:work|turn on|power on)|needs (?:repair|work|fixing|a new \w+)|faulty|for repair|disc read error|no (?:display|video|sound|picture)|red ring|yellow light|cracked screen|water damage|(?:icloud|activation|mdm) lock(?:ed)?|bad esn|blacklisted)\b/i;
+  R.MOTIVATED = /\b(moving(?: sale)?|must go|need(?:s)? (?:it )?gone|estate sale|cleaning out|garage sale|downsizing|first come first served|priced to sell|quick sale)\b/i;
+  R.clueOf = (re, text) => (text.match(re)?.[1] || "").toLowerCase().replace(/\s+/g, " ");
+
+  // ---------- what's remembered about listings you've seen ----------
+  // A drop: at least 3% or a dollar under the last price seen (the same rule as a saved listing's alert).
+  R.isDrop = (from, to) => from != null && to != null && to < from - Math.max(1, from * 0.03);
+  // One sighting of a listing, against what was remembered about it (rec, or nothing). Returns the record
+  // to keep and what's new about it: isNew (not seen before, on a search you've looked at before), known,
+  // and drop ({ from, since }) when the price fell. Auctions keep the last fixed price: a bid says nothing
+  // about drops. Each price change is kept (the last five) so a listing page can show its history.
+  // rec: { p: last price, pa: since when, f: first seen, a: last seen, o: first opened, h: [[price, since]] }
+  R.sighting = (rec, price, { now = Date.now(), pageHadKnown = false, auction = false } = {}) => {
+    const old = rec && typeof rec === "object" ? rec : null;
+    const out = { isNew: !old && !!pageHadKnown, known: !!old };
+    if (auction || !Number.isFinite(price)) price = null;
+    const last = Number.isFinite(old?.p) ? old.p : null;
+    if (old && price != null && R.isDrop(last, price)) out.drop = { from: last, since: old.pa };
+    const changed = old && price != null && last != null && last !== price;
+    const hist = changed ? [...(Array.isArray(old.h) ? old.h : []), [last, old.pa]].slice(-5) : old?.h;
+    const next = { p: price ?? last, pa: old && (price == null || last === price) ? old.pa : now, f: old?.f ?? now, a: now, ...(old?.o && { o: old.o }), ...(hist?.length && { h: hist }) };
+    return { out, rec: next };
+  };
+
+  // Listings on one page that share a title (4+ words, so "Nikon camera" doesn't count) or a photo:
+  // reposts, or one seller with several. Returns item -> how many share it (only for those that do).
+  R.duplicates = (items, isPlaceholder = () => false) => {
+    const groups = new Map();
+    const add = (k, it) => (groups.get(k) || groups.set(k, []).get(k)).push(it);
+    for (const it of items) {
+      const t = R.normTitle(it.title || "");
+      if (t.split(" ").length >= 4) add(`t:${t}`, it);
+      if (it.imageUrl && !isPlaceholder(it.imageUrl)) add(`i:${it.imageUrl}`, it);
+    }
+    const dup = new Map();
+    for (const list of groups.values()) if (list.length > 1) for (const it of list) dup.set(it, Math.max(dup.get(it) || 0, list.length));
+    return dup;
+  };
+
+  // ---------- the same photo on other listings ----------
+  // How many of two photo hashes' 64 bits differ (64 when either is missing).
+  R.hashDistance = (a, b) => {
+    if (!/^[0-9a-f]{16}$/.test(a || "") || !/^[0-9a-f]{16}$/.test(b || "")) return 64;
+    let d = 0;
+    for (let i = 0; i < 16; i += 8) for (let x = parseInt(a.slice(i, i + 8), 16) ^ parseInt(b.slice(i, i + 8), 16); x; x >>>= 1) d += x & 1;
+    return d;
+  };
+  R.PHOTO_NEAR = 4; // bits apart that still count as the same picture
+  // The other listings showing this listing's photo, from what you've seen (seen: key -> { h: hash, f: the
+  // photo's file name, t: title }). The same file under another listing is the seller's own relist or a catalog
+  // photo, and the same title is a relist or a repost already marked elsewhere: neither counts. What's left is
+  // the same picture uploaded again under another title: a stolen photo, or a stock one. Returns their keys.
+  R.photoTwins = (key, seen) => {
+    const me = seen?.[key];
+    if (!me?.h) return [];
+    const out = [];
+    for (const [k, o] of Object.entries(seen)) {
+      if (k === key || !o?.h || (o.f && o.f === me.f) || (o.t && o.t === me.t)) continue;
+      if (R.hashDistance(me.h, o.h) <= R.PHOTO_NEAR) out.push(k);
+    }
+    return out;
+  };
+  // A photo's file name from its address, which stays the same across the sizes a site serves it in (eBay:
+  // /images/g/<id>/s-l500.jpg; Facebook: /v/…/<id>_n.jpg?…).
+  R.photoFile = (url) => {
+    try {
+      const parts = new URL(url).pathname.split("/").filter(Boolean);
+      let last = parts.pop() || "";
+      if (/^s-l\d+\.\w+$/i.test(last)) last = parts.pop() || "";
+      return last.replace(/\.\w+$/, "");
+    } catch {
+      return "";
+    }
+  };
+
+  // The other codes a scam title has been posted under, by other listings. stemRec: { c: { code: key } }.
+  R.otherCodes = (stemRec, key, code) => Object.entries(stemRec?.c || {}).filter(([c, k]) => c !== code && k !== key).map(([c]) => c);
+
+  // ---------- did the page reader keep up with the site? ----------
+  // links: listings linked on the page (any link to a listing, counted once each), items: listings the
+  // adapter read, priced: how many of those came with a price. Sites change their markup without notice,
+  // and when the adapter misses, the panel would otherwise just show fewer listings, or none.
+  // partialOk: a page where many links sit outside the results (carousels on a category page) can't be
+  // judged by the share read, only by nothing read at all.
+  // level: "ok", "few" (too few listings to tell), "broken" (none read), "partial" (under a third read),
+  // "prices" (read, but most without a price).
+  R.readHealth = ({ links = 0, items = 0, priced = 0 }, { partialOk = false } = {}) => {
+    const out = { links, items, priced };
+    if (links < 6 && items < 6) return { ...out, level: "few" };
+    if (!items) return { ...out, level: "broken" };
+    if (!partialOk && links >= 10 && items < links / 3) return { ...out, level: "partial" };
+    if (items >= 6 && priced < items / 2) return { ...out, level: "prices" };
+    return { ...out, level: "ok" };
+  };
+  // What to tell you about it, in a sentence ("" when there's nothing to say).
+  R.healthNote = (hl, siteName) =>
+    hl.level === "broken"
+      ? `${siteName} changed this page and Tirekick can't read its listings (${hl.links} on the page, none read). Scores, marks and filters won't work here until it's fixed.`
+      : hl.level === "partial"
+        ? `${siteName} may have changed this page: Tirekick read ${hl.items} of the ${hl.links} listings on it. The rest get no marks, filters or scores.`
+        : hl.level === "prices"
+          ? `${siteName} may have changed this page: Tirekick read ${hl.items} listings but found a price on only ${hl.priced}. Deals, price filters and sold-price comparisons need it.`
+          : "";
+})();
