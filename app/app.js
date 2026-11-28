@@ -116,9 +116,52 @@
       settings[k] = v;
       saveSettings();
       drawCheck();
+      drawSell();
       drawBench();
     });
   $("#check").addEventListener("submit", (e) => e.preventDefault());
+
+  // ---------- sell something ----------
+  // The sell helper from Tirekick's page (TKRules.sellAsks, sellPrices, sellWhere, sellTitle, sellTips), from a sold
+  // price you type: the details that move the price as you type, then list, sell-fast and lowest prices with what
+  // each leaves you. Add to workbench keeps it as Listed, as on the computer.
+  const sellQ = $("#sell-q"), sellSold = $("#sell-sold"), sellPaid = $("#sell-paid"), sellLocal = $("#sell-local");
+  const sellAsks = $("#sell-asks"), sellOut = $("#sell-out");
+  const drawSell = () => {
+    const q = sellQ.value.trim();
+    $("#sell-link").href = soldUrl(q);
+    const sold = num(sellSold);
+    sellAsks.replaceChildren(...(q && !(sold > 0) ? [h("span", {}, "Put these in the words if they apply, as the price depends on them:"), h("ul", {}, R.sellAsks(q).map((a) => h("li", {}, a)))] : []));
+    if (!q || !(sold > 0)) return sellOut.replaceChildren();
+    const paid = num(sellPaid);
+    const market = { median: sold, n: 0, confidence: "rough", query: q };
+    const p = R.sellPrices(market, { title: q, feePct: settings.fee, paid, profit: settings.profit, local: sellLocal.checked || null });
+    const keepLine = (x) => (x.keep >= 0 ? `you keep ~${money(x.keep)}` : `a ~${money(-x.keep)} loss`);
+    const cellOf = (label, x) => h("div", { class: "mcell" }, h("span", {}, label), h("b", {}, money(x.price)), h("span", {}, keepLine(x)));
+    const where = R.sellWhere(q, p.typical, { local: p.local });
+    const title = R.sellTitle(q);
+    const add = h("button", { type: "button", class: "primary" }, "Add to workbench");
+    add.addEventListener("click", () => {
+      const was = Object.entries(finds).find(([, r]) => r.t.toLowerCase() === q.toLowerCase());
+      const find = { ...(was ? was[1] : {}), t: q, st: "listed", paid: paid ?? was?.[1].paid ?? null, lt: was?.[1].lt || Date.now(), lp: p.listAt.price, fp: p.fast.price, lo: p.floor?.price ?? null, lc: p.local, sold, sa: Date.now(), r: true, a0: was?.[1].a0 || Date.now() };
+      edit({ set: { [was ? was[0] : S.newFindKey()]: find } });
+      add.textContent = was ? "Updated on the workbench" : "Added, as Listed";
+    });
+    sellOut.replaceChildren(
+      ...[
+        h("div", { class: "mgrid" }, cellOf("List at", p.listAt), cellOf("Sell fast", p.fast), p.floor ? cellOf("Your lowest", p.floor) : h("div", { class: "mcell" }, h("span", {}, "Your lowest"), h("span", {}, "Bought it to resell? Type what you paid."))),
+        p.under ? h("p", { class: "warn" }, `To keep your ${money(settings.profit)} you'd need ${money(p.floor.price)}, more than it usually sells for.`) : null,
+        h("p", { class: "basis" }, `From the ${money(sold)} you typed.${p.basis.replace(/^From [^.]*\./, "")} List at leaves room for offers.`),
+        h("p", {}, h("b", {}, "Where: "), where.why),
+        h("div", {}, h("b", {}, "Title"), h("code", {}, title), h("button", { type: "button", onclick: (e) => copyText(e.currentTarget, title, "Title copied") }, "Copy the title")),
+        h("div", {}, h("b", {}, "Photos and what to say"), h("ul", {}, R.sellTips(q).map((t) => h("li", {}, t)))),
+        add,
+      ].filter(Boolean)
+    );
+  };
+  for (const el of [sellQ, sellSold, sellPaid]) el.addEventListener("input", drawSell);
+  sellLocal.addEventListener("change", drawSell);
+  $("#sell-form").addEventListener("submit", (e) => e.preventDefault());
 
   // ---------- scam signs in pasted listing text ----------
   // The extension's own checks on text you paste: taking the deal off the site (TK.offSite, Craigslist's own rules
@@ -332,6 +375,7 @@
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
   drawCheck();
+  drawSell();
   drawSigns();
   drawBench();
 })();

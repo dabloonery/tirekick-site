@@ -1,7 +1,7 @@
 {
   "name": "Tirekick workbench",
   "short_name": "Tirekick",
-  "description": "The most to pay for a find, questions for the seller, a safety checklist, and your finds from bought to sold. Works offline; nothing leaves your phone.",
+  "description": "What to list something for and where, the most to pay for a find, and your finds from bought to sold. Works offline; nothing leaves your phone.",
   "id": "/app/",
   "start_url": "./",
   "scope": "./",

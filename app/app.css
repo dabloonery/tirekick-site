@@ -55,6 +55,14 @@ details.more summary { cursor:pointer; color:var(--muted); font-size:14px; paddi
 .find .fx input, .find .fx select { min-height:42px; padding:8px 10px; }
 .find .acts { display:flex; justify-content:space-between; align-items:center; }
 .note { margin:10px 0 0; font-size:14px; }
+.sell-asks:empty { display:none; }
+.sell-asks { margin:12px 0 0; padding-left:12px; border-left:2px solid var(--rule); color:var(--muted); font-size:14px; }
+.sell-asks ul, .sell-out ul { margin:4px 0 0; padding-left:18px; }
+.mgrid { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; }
+.mcell { display:flex; flex-direction:column; gap:2px; font-size:12px; color:var(--muted); }
+.mcell b { font:800 22px/1.2 var(--display); color:var(--ink); }
+.sell-out .warn { color:var(--v-pass); font-weight:600; }
+.sell-out code { display:block; margin:4px 0 6px; padding:8px 10px; border:var(--bw) solid var(--line); border-radius:var(--r-sm); background:var(--paper); font:inherit; font-size:14px; overflow-wrap:anywhere; }
 textarea { width:100%; min-height:96px; padding:10px 12px; border:var(--bw) solid var(--line); border-radius:var(--r-sm); background:var(--paper); color:var(--ink); font:inherit; font-size:16px; resize:vertical; }
 label.cl { flex-direction:row; align-items:center; gap:8px; margin-top:10px; font-weight:500; }
 label.cl input { width:18px; height:18px; min-height:0; flex:none; accent-color:var(--accent); }
