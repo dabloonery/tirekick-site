@@ -5,6 +5,7 @@
 (() => {
   const S = self.TKShared;
   const R = self.TKRules;
+  const TK = self.Tirekick; // lib/adapters.js: only its text checks are used here (off-site contact, title codes)
   const $ = (s) => document.querySelector(s);
   const h = (tag, attrs = {}, ...kids) => {
     const el = document.createElement(tag);
@@ -100,12 +101,14 @@
   const addFind = () => {
     const q = qEl.value.trim() || "Something I found";
     const market = typedMarket();
-    const r = { t: q, a0: Date.now(), ...(num(askEl) != null && { ask: num(askEl) }), ...(market && { sold: market.median, ship: market.ship, sa: Date.now(), r: true }), ...(num(partsEl) > 0 && { parts: num(partsEl) }) };
+    const r = { t: q, a0: Date.now(), ...(num(askEl) != null && { ask: num(askEl) }), ...(market && { sold: market.median, ship: market.ship, sa: Date.now(), r: true }), ...(num(partsEl) > 0 && { parts: num(partsEl) }), ...(sharedLink && { note: sharedLink.slice(0, S.NOTE_MAX) }) };
     edit({ set: { [S.newFindKey()]: r } });
+    sharedLink = "";
+    $("#shared").textContent = "";
     note(`Added “${q.slice(0, 60)}” to your finds.`);
     $("#bench-h").scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  for (const el of [qEl, askEl, soldEl, shipEl, partsEl]) el.addEventListener("input", drawCheck);
+  for (const el of [qEl, askEl, soldEl, shipEl, partsEl]) el.addEventListener("input", () => (drawCheck(), drawSigns()));
   for (const [el, k, max] of [[profitEl, "profit", 100000], [feeEl, "fee", 50]])
     el.addEventListener("input", () => {
       const v = num(el);
@@ -116,6 +119,56 @@
       drawBench();
     });
   $("#check").addEventListener("submit", (e) => e.preventDefault());
+
+  // ---------- scam signs in pasted listing text ----------
+  // The extension's own checks on text you paste: taking the deal off the site (TK.offSite, Craigslist's own rules
+  // when ticked), a random code at the end of the title (TK.titleCode, Facebook's bulk scams), and an asking price far
+  // under what you typed it sells for, with the reason the listing gives if it gives one (TKRules.cheapReason).
+  const paste = $("#paste"), pasteCl = $("#paste-cl"), signs = $("#signs");
+  const drawSigns = () => {
+    const text = paste.value.trim();
+    if (!text) return signs.replaceChildren();
+    const cl = pasteCl.checked;
+    const title = text.split(/\n/).map((l) => l.trim()).find(Boolean) || "";
+    const off = TK.offSite(text, cl ? "craigslist" : undefined);
+    const code = cl ? "" : TK.titleCode(title);
+    const why = [...(off?.why || [])];
+    if (code) why.push(`the title ends with a code (“${code}”), like Facebook's bulk-posted fakes, unless it's the real model number`);
+    const ask = num(askEl), sold = num(soldEl);
+    // A pickup seller keeps the whole price, so it's compared with what an eBay seller keeps (R.LOCAL_NET).
+    if (ask > 0 && sold > 0 && ask < sold * R.LOCAL_NET * R.TOO_CHEAP.low) {
+      const said = R.cheapReason(title, text);
+      why.push(`the asking price is ${Math.round((ask / sold) * 100)}% of what it sells for${said ? `; it says why (“${said}”), so ask about it` : ", with no reason given"}`);
+    }
+    const sure = !!off?.sure || (ask > 0 && sold > 0 && ask < sold * R.TOO_CHEAP.far && why.length > 1);
+    signs.dataset.v = sure ? "suspicious" : why.length ? "fair" : "great";
+    signs.replaceChildren(
+      ...[h("p", { class: "head" }, sure ? "Likely a scam" : why.length ? "Check first" : "No scam signs found"),
+      why.length ? h("ul", {}, why.map((w) => h("li", {}, w.charAt(0).toUpperCase() + w.slice(1)))) : h("p", {}, "That isn't a promise: still see it working before you pay."),
+      sure ? h("p", {}, "Don't pay ahead or move to text or another app. Report the listing in the app.") : null].filter(Boolean)
+    );
+  };
+  paste.addEventListener("input", drawSigns);
+  pasteCl.addEventListener("change", drawSigns);
+
+  // ---------- shared into it (Android) ----------
+  // Installed on Android, Tirekick shows in the share sheet (manifest share_target): what the app shares arrives as
+  // ?title=&text=&url= here. Facebook and eBay share a link with no price, so the link is kept on the next find you
+  // add, and any text goes to the scam check. Nothing is opened or fetched.
+  let sharedLink = "";
+  {
+    const sp = new URLSearchParams(location.search);
+    const title = (sp.get("title") || "").trim(), text = (sp.get("text") || "").trim();
+    const link = ((sp.get("url") || "").trim() || text.match(/https?:\/\/\S+/)?.[0] || "").slice(0, 300);
+    if (title || text || link) {
+      const words = [title, text.replace(link, "").trim()].filter(Boolean).join("\n");
+      if (words) paste.value = words;
+      if (title && !qEl.value) qEl.value = title.slice(0, 200);
+      if (/^https:\/\//.test(link)) sharedLink = link;
+      history.replaceState(null, "", location.pathname);
+      $("#shared").textContent = (sharedLink ? "Link kept: it's saved with the next find you add. Type what it sells for and the asking price." : "Shared text is in the scam check below.");
+    }
+  }
 
   // ---------- questions for the seller and the safety checklist ----------
   $("#safety").replaceChildren(...R.SAFETY.map((s) => h("li", {}, s)));
@@ -181,7 +234,7 @@
     return h(
       "div",
       { class: "find", "data-call": st || f?.call || "" },
-      h("div", { class: "top" }, h("span", { class: "call" }, st ? STATE_WORD[st] : f?.call ? f.word : "No price"), h("div", { class: "ft" }, r.t, h("small", {}, line))),
+      h("div", { class: "top" }, h("span", { class: "call" }, st ? STATE_WORD[st] : f?.call ? f.word : "No price"), h("div", { class: "ft" }, r.t, h("small", {}, line), r.note ? h("span", { class: "nt" }, r.note) : null)),
       h(
         "div",
         { class: "fx" },
@@ -217,9 +270,8 @@
   // ---------- keep a copy ----------
   // The same file as a backup from Tirekick's settings (app "tirekick", finds), so the computer restores it (merged:
   // what's there wins) and this page opens one from the computer. Only finds: nothing else is kept here.
-  const noteEl = $("#note");
   function note(text) {
-    noteEl.textContent = text;
+    $("#note").textContent = text;
   }
   $("#export").addEventListener("click", async () => {
     const n = Object.keys(finds).length;
@@ -280,5 +332,6 @@
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
   drawCheck();
+  drawSigns();
   drawBench();
 })();

@@ -41,6 +41,7 @@
       </details>
     </form>
     <p class="hint sold-how">Sells for: the typical price it sold for. <a id="sold-link" href="https://www.ebay.com/sch/i.html?LH_Sold=1&amp;LH_Complete=1" target="_blank" rel="noopener noreferrer">See its eBay sales</a>, skip parts and lots, and take the middle one.</p>
+    <p class="note" id="shared" role="status"></p>
     <div class="out" id="out" aria-live="polite"></div>
   </section>
 
@@ -49,6 +50,14 @@
     <p class="bench-sum" id="sum" aria-live="polite"></p>
     <div class="rows" id="rows"></div>
     <p class="hint empty" id="empty">Nothing yet. Check a find and press Add to workbench, or bring your finds over from Tirekick on your computer below.</p>
+  </section>
+
+  <section class="card" aria-labelledby="scam-h">
+    <h2 id="scam-h">Scam signs in a listing</h2>
+    <p class="hint">Paste a listing's title and description (press and hold the text in the app, then Copy). The same checks as Tirekick on your computer, on this phone only.</p>
+    <label class="wide">Listing text <textarea id="paste" rows="4" placeholder="Title, then the description"></textarea></label>
+    <label class="cl"><input type="checkbox" id="paste-cl"> It's on Craigslist (phone numbers and "text me" are normal there)</label>
+    <div class="signs" id="signs" aria-live="polite"></div>
   </section>
 
   <section class="card" aria-labelledby="ask-h">
@@ -83,6 +92,7 @@
 <script src="lib/sites.js"></script>
 <script src="lib/shared.js"></script>
 <script src="lib/rules.js"></script>
+<script src="lib/adapters.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
